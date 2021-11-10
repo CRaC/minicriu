@@ -8,6 +8,7 @@
 #include <stdio.h>
 #include <unistd.h>
 #include <signal.h>
+#include <sched.h>
 #include <sys/mman.h>
 #include <sys/fcntl.h>
 #include <sys/user.h>
@@ -16,11 +17,16 @@
 #include <sys/ucontext.h>
 #include <asm/prctl.h>        /* Definition of ARCH_* constants */
 #include <sys/syscall.h>      /* Definition of SYS_* constants */
+#include <linux/sched.h>
 
 
-static struct elf_prstatus *prstatus;
 static struct elf_prpsinfo *prpsinfo;
-static struct user_fpregs_struct *prfpreg;
+
+#define MAX_THREADS 16
+static int thread_n;
+static struct elf_prstatus *prstatus[MAX_THREADS];
+static struct user_fpregs_struct *prfpreg[MAX_THREADS];
+static char stack[MAX_THREADS][4 * 4096];
 
 static void arch_prctl(int code, unsigned long addr) {
 	if (syscall(SYS_arch_prctl, code, addr)) {
@@ -33,7 +39,10 @@ static void restore(int sig, siginfo_t *info, void *ctx) {
 	ucontext_t *uc = (ucontext_t *) ctx;
 
 	greg_t *gregs = uc->uc_mcontext.gregs;
-	struct user_regs_struct *uregs = (void*)prstatus->pr_reg;
+	int thread_id = gregs[REG_RDX];
+	struct user_regs_struct *uregs = (void*)prstatus[thread_id]->pr_reg;
+
+	printf("restore %d fsbase %lx\n", thread_id, uregs->fs_base);
 
 	gregs[REG_R15] = uregs->r15;
 	gregs[REG_R14] = uregs->r14;
@@ -66,11 +75,22 @@ static void restore(int sig, siginfo_t *info, void *ctx) {
 	/*gregs[REG_] = uregs->gs;*/
 
 
-
+#if 0
+	volatile static int block = 1;
+	while (block) {
+	}
+#endif
 }
 
 static unsigned long align_up(unsigned long v, unsigned p) {
 	return (v + p - 1) & ~(p - 1);
+}
+
+static int clonefn(void *arg) {
+	int r = syscall(SYS_tkill, syscall(SYS_gettid), SIGUSR1,
+			/* extra arg to _signal handler_ */ arg);
+	fprintf(stderr, "should not reach here (thread %d)\n", (int)(long)arg);
+	return 1;
 }
 
 int main(int argc, char *argv[]) {
@@ -130,9 +150,9 @@ int main(int argc, char *argv[]) {
 		void *target = NULL;
 		if (!strcmp("CORE", rawelf + nameoff)) {
 			switch (nh->n_type) {
-			case NT_PRSTATUS: target = &prstatus; break;
 			case NT_PRPSINFO: target = &prpsinfo; break;
-			case NT_PRFPREG:  target = &prfpreg;  break;
+			case NT_PRSTATUS: target = &prstatus[thread_n++]; break;
+			case NT_PRFPREG:  target = &prfpreg[thread_n];  break;
 			default: break;
 			}
 		}
@@ -162,7 +182,7 @@ int main(int argc, char *argv[]) {
 				struct filemap *fm = &fh->map[i];
 
 				int fd = open(name, O_RDONLY);
-				void *addr = mmap((void*)fm->start, 
+				void *addr = mmap((void*)fm->start,
 						fm->end - fm->start,
 						PROT_READ | PROT_WRITE | PROT_EXEC,
 						MAP_PRIVATE,
@@ -201,7 +221,8 @@ int main(int argc, char *argv[]) {
 				fd, ph->p_offset);
 		if (addr != (void*)ph->p_vaddr) {
 			if (addr == MAP_FAILED) {
-				perror("WARN: mmap phdr");
+				fprintf(stderr, "WARN: mmap phdr vaddr %16lx filesz %16lx off %16lx: %m\n",
+						ph->p_vaddr, ph->p_filesz, ph->p_offset);
 			} else {
 				fprintf(stderr, "WARN: mmap phdr target mismatch %lx -> %p\n", ph->p_vaddr, addr);
 			}
@@ -220,6 +241,33 @@ int main(int argc, char *argv[]) {
 		return 1;
 	}
 
+	for (int i = 1; i < thread_n; ++i) {
+		const int flags = CLONE_VM | CLONE_FS | CLONE_FILES | CLONE_SYSVSEM
+                           | CLONE_SIGHAND | CLONE_THREAD;
+                           /*| CLONE_SETTLS | CLONE_PARENT_SETTID | CLONE_CHILD_CLEARTID*/
+#if 0
+		static_assert(sizeof(stack[i]) == 4 * 4096);
+		struct clone_args args = {
+			.flags = flags,
+			.stack = (unsigned long)stack[i],
+			.stack_size = sizeof(stack[i]),
+		};
+		memset(stack[i], 0xaa, sizeof(stack[i]));
+		int ret = syscall(SYS_clone3, &args, sizeof(args), 0xaaaaaaaaaaaaa, 0xbbbbbbbbbbb);
+		if (ret == -1) {
+			perror("clone3");
+		} else if (!ret) {
+			volatile register long thread_id asm("rax") = i;
+			raise(SIGUSR1);
+			fprintf(stderr, "should not reach here\n");
+		}
+#else
+		if (-1 == clone(clonefn, stack[i] + sizeof(stack[i]), flags, (void*)(uintptr_t)i)) {
+			perror("clone");
+		}
+#endif
+	}
+	volatile register long thread_id asm("rax") = 0;
 	raise(SIGUSR1);
 	fprintf(stderr, "should not reach here\n");
 	return 0;

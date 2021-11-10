@@ -3,6 +3,8 @@ ASFLAGS = $(CFLAGS)
 
 minicriu : CFLAGS += -static -fPIE
 
+test: LDLIBS += -lpthread
+
 all : run
 
 file :
@@ -17,6 +19,9 @@ sim-run : test
 
 run : minicriu core
 	./$^
+
+%.readelf : %
+	readelf -a $< > $@
 
 clean :
 	rm -f minicriu test file core *.[od]
