@@ -1,11 +1,17 @@
 CFLAGS = -g -MMD -MT $@ -MF $@.d
 ASFLAGS = $(CFLAGS)
 
-minicriu : CFLAGS += -static -fPIE
+all : minicriu libminicriu-client.a
 
-test: LDLIBS += -lpthread
+minicriu : minicriu.o
+minicriu : LDFLAGS += -static
+minicriu.o : CFLAGS += -fPIE
 
-all : run
+libminicriu-client.a : minicriu-client.o
+	ar rcs $@ $^
+
+test : test.o libminicriu-client.a
+test : LDLIBS += -lpthread
 
 file :
 	truncate -s 4K $@
@@ -24,6 +30,6 @@ run : minicriu core
 	readelf -a $< > $@
 
 clean :
-	rm -f minicriu test file core *.[od]
+	rm -f minicriu test file core *.[aod]
 
 -include $(wildcard *.d)

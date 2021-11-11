@@ -2,4 +2,4 @@
 /test
 /core
 /file
-*.d
+*.[aod]
