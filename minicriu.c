@@ -267,8 +267,7 @@ int main(int argc, char *argv[]) {
 		}
 #endif
 	}
-	volatile register long thread_id asm("rax") = 0;
-	raise(SIGUSR1);
+	clonefn((void*)(uintptr_t)0);
 	fprintf(stderr, "should not reach here\n");
 	return 0;
 }
