@@ -27,7 +27,7 @@ sim-run : test
 	gdb -q -batch -ex 'handle SIGABRT noprint nostop nopass' -ex 'run' ./test
 
 run : minicriu core
-	sudo ./$^
+	sudo bash -c 'ulimit -c unlimited; ./$^; exit $?'
 
 %.readelf : %
 	readelf -a $< > $@

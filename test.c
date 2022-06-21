@@ -43,19 +43,34 @@ int main(int argc, char *argv[]) {
 	pid_t oldpid = getpid();
 	printf("pid %ld\n", oldpid);
 
+#if 0
 	pthread_t other;
 	pthread_create(&other, NULL, thread, NULL);
 	sleep(1);
+#endif
 
-	minicriu_dump();
+	if (argc == 1) {
+		minicriu_dump();
+	}
 
+	printf("done\n");
+
+	volatile int loop = 1;
+	while(loop);
+	sleep(3);
+	*((int*)0) = 1;
+
+	printf("done2\n");
+#if 0
 	while (1) {
 		printf("pid old %ld new %ld\n", oldpid, getpid());
+		/**((int*)0) = 1;*/
 		sleep(1);
 	}
 
 	// WILL NOT WORK: other has a stale TID inside
 	pthread_join(other, NULL);
+#endif
 
 	return 0;
 }

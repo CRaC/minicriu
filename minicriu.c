@@ -28,6 +28,9 @@ static struct elf_prstatus *prstatus[MAX_THREADS];
 static struct user_fpregs_struct *prfpreg[MAX_THREADS];
 static char stack[MAX_THREADS][4 * 4096];
 
+static size_t elfsz;
+static void *rawelf;
+
 static void arch_prctl(int code, unsigned long addr) {
 	if (syscall(SYS_arch_prctl, code, addr)) {
 		perror("arch_prctl");
@@ -74,6 +77,9 @@ static void restore(int sig, siginfo_t *info, void *ctx) {
 	/*gregs[REG_] = uregs->fs;*/
 	/*gregs[REG_] = uregs->gs;*/
 
+	if (thread_id == 0) {
+		munmap(rawelf, elfsz);
+	}
 
 #if 0
 	volatile static int block = 1;
@@ -108,7 +114,8 @@ int main(int argc, char *argv[]) {
 		return 1;
 	}
 
-	void *rawelf = mmap(NULL, align_up(st.st_size, 4096), PROT_READ, MAP_PRIVATE, fd, 0);
+	elfsz = align_up(st.st_size, 4096);
+	rawelf = mmap(NULL, elfsz, PROT_READ, MAP_PRIVATE, fd, 0);
 	if (rawelf == MAP_FAILED) {
 		perror("mmap");
 		return 1;
@@ -135,10 +142,35 @@ int main(int argc, char *argv[]) {
 			break;
 		}
 	}
+
 	if (!ph_notes) {
 		fprintf(stderr, "cannot find PT_NOTE\n");
 		return 1;
 	}
+
+	for (int i = 0; i < ehdr->e_phnum; ++i) {
+		const Elf64_Phdr *ph = phdrs + i;
+		if (ph->p_type != PT_LOAD) {
+			continue;
+		}
+		if (munmap((void*)ph->p_vaddr, ph->p_filesz)) {
+			/*perror("munmap");*/
+		}
+		void *addr = mmap((void*)ph->p_vaddr,
+				ph->p_filesz,
+				PROT_READ | PROT_WRITE | PROT_EXEC,
+				MAP_PRIVATE | MAP_FIXED | MAP_ANONYMOUS,
+				-1, 0);
+		if (addr != (void*)ph->p_vaddr) {
+			if (addr == MAP_FAILED) {
+				fprintf(stderr, "WARN: mmap phdr vaddr %16lx filesz %16lx off %16lx: %m\n",
+						ph->p_vaddr, ph->p_filesz, ph->p_offset);
+			} else {
+				fprintf(stderr, "WARN: mmap phdr target mismatch %lx -> %p\n", ph->p_vaddr, addr);
+			}
+		}
+	}
+
 	off_t noff = ph_notes->p_offset;
 	while (noff < ph_notes->p_offset + ph_notes->p_filesz) {
 		Elf64_Nhdr *nh = rawelf + noff;
@@ -182,10 +214,11 @@ int main(int argc, char *argv[]) {
 				struct filemap *fm = &fh->map[i];
 
 				int fd = open(name, O_RDONLY);
+				munmap((void*)fm->start, fm->end - fm->start);
 				void *addr = mmap((void*)fm->start,
 						fm->end - fm->start,
 						PROT_READ | PROT_WRITE | PROT_EXEC,
-						MAP_PRIVATE,
+						MAP_FIXED | MAP_PRIVATE,
 						fd, fm->file_ofs * fh->page_size);
 				if (addr != (void*)fm->start) {
 					if (addr == MAP_FAILED) {
@@ -202,33 +235,13 @@ int main(int argc, char *argv[]) {
 		}
 	}
 
+
 	for (int i = 0; i < ehdr->e_phnum; ++i) {
 		const Elf64_Phdr *ph = phdrs + i;
 		if (ph->p_type != PT_LOAD) {
 			continue;
 		}
-
-#if 0
-		memcpy((void*)ph->p_vaddr, rawelf + ph->p_offset, ph->p_filesz);
-#else
-		if (munmap((void*)ph->p_vaddr, ph->p_filesz)) {
-			/*perror("munmap");*/
-		}
-		void *addr = mmap((void*)ph->p_vaddr,
-				ph->p_filesz,
-				PROT_READ | PROT_WRITE | PROT_EXEC,
-				MAP_PRIVATE | MAP_FIXED,
-				fd, ph->p_offset);
-		if (addr != (void*)ph->p_vaddr) {
-			if (addr == MAP_FAILED) {
-				fprintf(stderr, "WARN: mmap phdr vaddr %16lx filesz %16lx off %16lx: %m\n",
-						ph->p_vaddr, ph->p_filesz, ph->p_offset);
-			} else {
-				fprintf(stderr, "WARN: mmap phdr target mismatch %lx -> %p\n", ph->p_vaddr, addr);
-			}
-			/*return 1;*/
-		}
-#endif
+		pread(fd, (void*)ph->p_vaddr, ph->p_filesz, ph->p_offset);
 	}
 
 	struct sigaction sa = {
