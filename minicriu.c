@@ -3,7 +3,7 @@
 #include <assert.h>
 #include <alloca.h>
 #include <string.h>
-#include <elf.h>
+#include <stdint.h>
 #include <stdlib.h>
 #include <stdio.h>
 #include <unistd.h>
@@ -18,11 +18,13 @@
 #include <asm/prctl.h>        /* Definition of ARCH_* constants */
 #include <sys/syscall.h>      /* Definition of SYS_* constants */
 #include <linux/sched.h>
+#include <linux/elf.h>
 
 
 static struct elf_prpsinfo *prpsinfo;
 
-#define MAX_THREADS 16
+#define MAX_THREADS 128
+
 static int thread_n;
 static struct elf_prstatus *prstatus[MAX_THREADS];
 static struct user_fpregs_struct *prfpreg[MAX_THREADS];
@@ -45,7 +47,7 @@ static void restore(int sig, siginfo_t *info, void *ctx) {
 	int thread_id = gregs[REG_RDX];
 	struct user_regs_struct *uregs = (void*)prstatus[thread_id]->pr_reg;
 
-	printf("restore %d fsbase %lx\n", thread_id, uregs->fs_base);
+	/*printf("restore %d fsbase %llx\n", thread_id, uregs->fs_base);*/
 
 	gregs[REG_R15] = uregs->r15;
 	gregs[REG_R14] = uregs->r14;
@@ -77,12 +79,14 @@ static void restore(int sig, siginfo_t *info, void *ctx) {
 	/*gregs[REG_] = uregs->fs;*/
 	/*gregs[REG_] = uregs->gs;*/
 
+#if 0
 	if (thread_id == 0) {
 		munmap(rawelf, elfsz);
 	}
+#endif
 
 #if 0
-	volatile static int block = 1;
+	volatile int block = 1;
 	while (block) {
 	}
 #endif
@@ -93,7 +97,7 @@ static unsigned long align_up(unsigned long v, unsigned p) {
 }
 
 static int clonefn(void *arg) {
-	int r = syscall(SYS_tkill, syscall(SYS_gettid), SIGUSR1,
+	int r = syscall(SYS_tkill, syscall(SYS_gettid), SIGSYS,
 			/* extra arg to _signal handler_ */ arg);
 	fprintf(stderr, "should not reach here (thread %d)\n", (int)(long)arg);
 	return 1;
@@ -163,10 +167,10 @@ int main(int argc, char *argv[]) {
 				-1, 0);
 		if (addr != (void*)ph->p_vaddr) {
 			if (addr == MAP_FAILED) {
-				fprintf(stderr, "WARN: mmap phdr vaddr %16lx filesz %16lx off %16lx: %m\n",
+				fprintf(stderr, "WARN: mmap phdr vaddr %16llx filesz %16llx off %16llx: %m\n",
 						ph->p_vaddr, ph->p_filesz, ph->p_offset);
 			} else {
-				fprintf(stderr, "WARN: mmap phdr target mismatch %lx -> %p\n", ph->p_vaddr, addr);
+				fprintf(stderr, "WARN: mmap phdr target mismatch %llx -> %p\n", ph->p_vaddr, addr);
 			}
 		}
 	}
@@ -249,7 +253,7 @@ int main(int argc, char *argv[]) {
 		.sa_flags = SA_SIGINFO
 	};
 	sigemptyset(&sa.sa_mask);
-	if (sigaction(SIGUSR1, &sa, NULL)) {
+	if (sigaction(SIGSYS, &sa, NULL)) {
 		perror("sigaction");
 		return 1;
 	}

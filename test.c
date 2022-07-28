@@ -7,6 +7,7 @@
 #include <sys/syscall.h>      /* Definition of SYS_* constants */
 
 #include "minicriu-client.h"
+#include "shared.h"
 
 static pid_t gettid(void) {
 	return syscall(SYS_gettid);
@@ -16,11 +17,13 @@ void *thread(void *arg) {
 
 	minicriu_register_new_thread();
 
+	thr_local = -gettid();
+
 	pid_t old = gettid();
 	printf("tid %d\n", old);
 
 	while (1) {
-		printf("old tid %d new tid %d\n", old, gettid());
+		printf("old tid %d new tid %d local %d\n", old, gettid(), shared_fn());
 		usleep(300000);
 	}
 }
@@ -43,11 +46,13 @@ int main(int argc, char *argv[]) {
 	pid_t oldpid = getpid();
 	printf("pid %ld\n", oldpid);
 
-#if 0
+	thr_local = -gettid();
+
 	pthread_t other;
+#if 0
 	pthread_create(&other, NULL, thread, NULL);
-	sleep(1);
 #endif
+	sleep(1);
 
 	if (argc == 1) {
 		minicriu_dump();
@@ -55,15 +60,14 @@ int main(int argc, char *argv[]) {
 
 	printf("done\n");
 
-	volatile int loop = 1;
-	while(loop);
-	sleep(3);
-	*((int*)0) = 1;
+	/*sleep(3);*/
+	/**((int*)0) = 1;*/
+	shared_fn();
 
 	printf("done2\n");
-#if 0
+#if 1
 	while (1) {
-		printf("pid old %ld new %ld\n", oldpid, getpid());
+		printf("pid old %ld new %ld local %d\n", oldpid, getpid(), shared_fn());
 		/**((int*)0) = 1;*/
 		sleep(1);
 	}

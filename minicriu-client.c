@@ -2,6 +2,7 @@
 
 #include <string.h>
 #include <stdio.h>
+#include <errno.h>
 #include <limits.h>
 #include <stdint.h>
 #include <stdlib.h>
@@ -16,7 +17,7 @@
 
 #include "minicriu-client.h"
 
-#define MC_THREAD_SIG SIGUSR1
+#define MC_THREAD_SIG SIGSYS
 
 static volatile uint32_t mc_futex_checkpoint;
 static volatile uint32_t mc_futex_restore;
@@ -35,38 +36,49 @@ struct savedctx {
 	asm volatile("wrgsbase %0" : : "r" (ctx.gsbase) : "memory"); \
 } while(0)
 
-static void writefile(const char *file, const char *content, size_t len) {
+static int readfile(const char *file, char *buf, size_t len) {
+	int fd = open(file, O_RDONLY);
+	if (fd < 0) {
+		return -errno;
+	}
+	int bytes = read(fd, buf, len);
+	if (bytes < 0) {
+		bytes = -errno;
+	}
+	close(fd);
+	return bytes;
+}
+
+static int writefile(const char *file, const char *buf, size_t len) {
 	int fd = open(file, O_RDWR);
 	if (fd < 0) {
-		perror(file);
-		return;
+		return -errno;
 	}
-	write(fd, content, len);
+	int bytes = write(fd, buf, len);
+	if (bytes < 0) {
+		bytes = -errno;
+	}
 	close(fd);
+	return bytes;
 }
 
 int minicriu_dump(void) {
-	struct sigaction old, new;
-	int fd;
 
 	pid_t mytid = syscall(SYS_gettid);
+	pid_t mypid = getpid();
 
-	new.sa_handler = SIG_DFL;
-	if (sigaction(SIGABRT, &new, &old)) {
-		perror("sigaction");
-		return 1;
-	}
+	printf("minicriu thread %d\n", mytid);
 
 	char auxv[1024];
-	int auxvlen = 0;
-	fd = open("/proc/self/auxv", O_RDONLY);
-	if (fd < 0) {
-		perror("open auxv");
-	} else {
-		if ((auxvlen = read(fd, auxv, sizeof(auxv))) < 0) {
-			perror("read auxv");
-		}
-		close(fd);
+	int auxvlen = readfile("/proc/self/auxv", auxv, sizeof(auxv));
+	if (auxvlen < 0) {
+		fprintf(stderr, "read auxv: %s\n", strerror(auxvlen));
+	}
+
+	char comm[1024];
+	int commlen = readfile("/proc/self/comm", auxv, sizeof(auxv));
+	if (commlen < 0) {
+		fprintf(stderr, "read comm: %s\n", strerror(commlen));
 	}
 
 	struct savedctx ctx;
@@ -79,7 +91,12 @@ int minicriu_dump(void) {
 			continue;
 		}
 		int tid = atoi(taskdent->d_name);
+		printf("minicriu %d me %d\n", tid, mytid == tid);
 		if (tid == mytid) {
+			continue;
+		}
+		if (tid == mypid) {
+			/* don't touch premodorial thread */
 			continue;
 		}
 		int r = syscall(SYS_tkill, tid, MC_THREAD_SIG);
@@ -92,20 +109,36 @@ int minicriu_dump(void) {
 		syscall(SYS_futex, &mc_futex_checkpoint, FUTEX_WAIT, current_count);
 	}
 
-#if 1
-	pid_t pid = syscall(SYS_getpid);
-	syscall(SYS_kill, pid, SIGABRT);
+	struct sigaction acts[SIGRTMAX];
+	struct sigaction new = { .sa_handler = SIG_DFL };
+	for (int i = 1; i < SIGRTMAX; ++i) {
+		if (sigaction(i, &new, &acts[i])) {
+			char msg[256];
+			snprintf(msg, sizeof(msg), "sigaction checkpoint %d: %m", i);
+			fprintf(stderr, "%s\n", msg);
+		}
+	}
 
-	mc_futex_restore = 1;
-	syscall(SYS_futex, &mc_futex_restore, FUTEX_WAKE, INT_MAX);
-#endif
+	pid_t pid = syscall(SYS_getpid);
+	syscall(SYS_kill, mytid, SIGABRT, 1313, mytid);
 
 	RESTORE_CTX(ctx);
 
-	if (sigaction(SIGABRT, &old, NULL)) {
-		perror("sigaction 2");
+	for (int i = 1; i < SIGRTMAX; ++i) {
+		if (sigaction(i, &acts[i], NULL)) {
+			char msg[256];
+			snprintf(msg, sizeof(msg), "sigaction restore %d: %m", i);
+			fprintf(stderr, "%s\n", msg);
+		}
 	}
 
+	if ((0 < auxvlen) && (prctl(PR_SET_MM, PR_SET_MM_AUXV, auxv, auxvlen, 0) < 0)) {
+		perror("prctl auxv");
+	}
+
+	writefile("/proc/self/comm", comm, commlen);
+
+#if 0
 	FILE *f = fopen("/proc/self/maps", "r");
 	char line[4096];
 	while (fgets(line, sizeof(line), f)) {
@@ -121,15 +154,7 @@ int minicriu_dump(void) {
 		}
 	}
 
-	if ((0 < auxvlen) && (prctl(PR_SET_MM, PR_SET_MM_AUXV, auxv, auxvlen, 0) < 0)) {
-		perror("prctl auxv");
-	}
-
-	writefile("/proc/self/auxv", auxv, auxvlen);
-
-	/*while(1);*/
-#if 1
-	fd = open("./test", O_RDONLY);
+	int fd = open("./test", O_RDONLY);
 	if (fd < 0) {
 		perror("open ./test");
 		return 0;
@@ -138,9 +163,9 @@ int minicriu_dump(void) {
 	if (syscall(SYS_prctl, PR_SET_MM, PR_SET_MM_EXE_FILE, fd, 0, 0)) {
 		perror("prctl EXE_FILE");
 	}
+#endif
 
-	writefile("/proc/self/comm", "./test", 6);
-
+#if 0
 	char *stack = mmap(NULL, 1 * 4096,
 			PROT_READ | PROT_WRITE,
 			MAP_PRIVATE | MAP_GROWSDOWN | MAP_ANONYMOUS,
@@ -160,6 +185,12 @@ int minicriu_dump(void) {
 	}
 #endif
 
+	mc_futex_restore = 1;
+	syscall(SYS_futex, &mc_futex_restore, FUTEX_WAKE, INT_MAX);
+
+	volatile int thread_loop = 0;
+	while (thread_loop);
+
 	return 0;
 }
 
@@ -170,6 +201,8 @@ static void mc_sighnd(int sig) {
 
 	struct savedctx ctx;
 	SAVE_CTX(ctx);
+
+	int tid = syscall(SYS_gettid);
 
 	while (!mc_futex_restore) {
 		// syscall sets thread-local errno while thread-local
@@ -182,13 +215,15 @@ static void mc_sighnd(int sig) {
 			: "a"(SYS_futex),
 			  "D"(&mc_futex_restore),
 			  "S"(FUTEX_WAIT),
-			  "d"(0)
+			  "d"(0),
+			  "b"(tid)
 			: "memory");
 	}
 
 	RESTORE_CTX(ctx);
 
-	syscall(SYS_write, 1, "restored\n", 9);
+	volatile int thread_loop = 0;
+	while (thread_loop);
 }
 
 int minicriu_register_new_thread(void) {
@@ -198,6 +233,16 @@ int minicriu_register_new_thread(void) {
 		perror("sigaction");
 		return 1;
 	}
+
+	sigset_t set;
+	sigemptyset(&set);
+	sigaddset(&set, MC_THREAD_SIG);
+	if (pthread_sigmask(SIG_UNBLOCK, &set, NULL)) {
+		perror("sigprocmask UNBLOCK");
+		return 1;
+	}
+
+	return 0;
 }
 
 
