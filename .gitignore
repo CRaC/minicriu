@@ -2,4 +2,5 @@
 /test
 /core
 /file
+/libshared.so
 *.[aod]
