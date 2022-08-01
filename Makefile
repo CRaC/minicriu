@@ -36,6 +36,7 @@ sim-run : test
 run : minicriu core
 	sudo rm -f /tmp/core.*
 	sudo bash -c 'ulimit -c unlimited; ./$^; exit $$?' || sudo mv /tmp/core.* core.crash && sudo chmod a+rw core.crash
+	#./$^
 
 %.readelf : %
 	readelf -a $< > $@

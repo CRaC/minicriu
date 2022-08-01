@@ -1,5 +1,7 @@
 #define _GNU_SOURCE
 
+
+#include <assert.h>
 #include <string.h>
 #include <stdio.h>
 #include <errno.h>
@@ -8,6 +10,7 @@
 #include <stdlib.h>
 #include <unistd.h>
 #include <dirent.h>
+#include <pthread.h>
 #include <signal.h>
 #include <fcntl.h>
 #include <sys/syscall.h>      /* Definition of SYS_* constants */
@@ -35,6 +38,16 @@ struct savedctx {
 	asm volatile("wrfsbase %0" : : "r" (ctx.fsbase) : "memory"); \
 	asm volatile("wrgsbase %0" : : "r" (ctx.gsbase) : "memory"); \
 } while(0)
+
+static pid_t* gettid_ptr(pthread_t thr) {
+	const size_t header_size =
+#if defined(__x86_64__)
+		0x2c0;
+#else
+#error "Unimplemented arch"
+#endif
+	return (pid_t*) ((char*)thr + header_size + 2 * sizeof(void*));
+}
 
 static int readfile(const char *file, char *buf, size_t len) {
 	int fd = open(file, O_RDONLY);
@@ -124,6 +137,9 @@ int minicriu_dump(void) {
 
 	RESTORE_CTX(ctx);
 
+	int newtid = syscall(SYS_gettid);
+	*gettid_ptr(pthread_self()) = newtid;
+
 	for (int i = 1; i < SIGRTMAX; ++i) {
 		if (sigaction(i, &acts[i], NULL)) {
 			char msg[256];
@@ -194,6 +210,7 @@ int minicriu_dump(void) {
 	return 0;
 }
 
+
 static void mc_sighnd(int sig) {
 
 	__atomic_fetch_add(&mc_futex_checkpoint, 1, __ATOMIC_SEQ_CST);
@@ -203,6 +220,17 @@ static void mc_sighnd(int sig) {
 	SAVE_CTX(ctx);
 
 	int tid = syscall(SYS_gettid);
+
+	pthread_t self = pthread_self();
+	pid_t *tidptr = gettid_ptr(self);
+	pthread_kill(self, 0);
+
+	char buf[256];
+	int len = snprintf(buf, sizeof(buf), "%s: self %p tidptr %p *tidptr %d\n",
+			__func__, self, tidptr, *tidptr);
+	write(2, buf, len);
+
+	assert(*gettid_ptr(pthread_self()) == tid);
 
 	while (!mc_futex_restore) {
 		// syscall sets thread-local errno while thread-local
@@ -222,11 +250,15 @@ static void mc_sighnd(int sig) {
 
 	RESTORE_CTX(ctx);
 
+	int newtid = syscall(SYS_gettid);
+	*gettid_ptr(pthread_self()) = newtid;
+
 	volatile int thread_loop = 0;
 	while (thread_loop);
 }
 
 int minicriu_register_new_thread(void) {
+
 	struct sigaction new;
 	new.sa_handler = mc_sighnd;
 	if (sigaction(MC_THREAD_SIG, &new, NULL)) {
