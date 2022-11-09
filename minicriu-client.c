@@ -124,9 +124,10 @@ int minicriu_dump(void) {
 	struct savedctx ctx;
 	SAVE_CTX(ctx);
 
-	struct sigaction new;
-	new.sa_handler = mc_sighnd;
-	if (sigaction(MC_THREAD_SIG, &new, NULL)) {
+	struct sigaction newhnd = { .sa_handler = mc_sighnd };
+	struct sigaction oldhnd;
+
+	if (sigaction(MC_THREAD_SIG, &newhnd, &oldhnd)) {
 		perror("sigaction");
 		return 1;
 	}
@@ -157,7 +158,7 @@ int minicriu_dump(void) {
 	}
 
 	struct sigaction acts[SIGRTMAX];
-	new.sa_handler = SIG_DFL;
+	struct sigaction new = { .sa_handler = SIG_DFL };
 	for (int i = 1; i < SIGRTMAX; ++i) {
 		if (sigaction(i, &new, &acts[i])) {
 			char msg[256];
@@ -165,6 +166,8 @@ int minicriu_dump(void) {
 			fprintf(stderr, "%s\n", msg);
 		}
 	}
+
+	acts[MC_THREAD_SIG] = oldhnd;
 
 	pid_t pid = syscall(SYS_getpid);
 	syscall(SYS_kill, mytid, SIGABRT, 1313, mytid);
