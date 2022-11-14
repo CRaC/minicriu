@@ -50,6 +50,8 @@
 static volatile uint32_t mc_futex_checkpoint;
 static volatile uint32_t mc_futex_restore;
 
+static void mc_sighnd(int sig);
+
 struct savedctx {
 	unsigned long fsbase, gsbase;
 };
@@ -122,6 +124,14 @@ int minicriu_dump(void) {
 	struct savedctx ctx;
 	SAVE_CTX(ctx);
 
+	struct sigaction newhnd = { .sa_handler = mc_sighnd };
+	struct sigaction oldhnd;
+
+	if (sigaction(MC_THREAD_SIG, &newhnd, &oldhnd)) {
+		perror("sigaction");
+		return 1;
+	}
+
 	DIR* tasksdir = opendir("/proc/self/task/");
 	struct dirent *taskdent;
 	while ((taskdent = readdir(tasksdir))) {
@@ -156,6 +166,8 @@ int minicriu_dump(void) {
 			fprintf(stderr, "%s\n", msg);
 		}
 	}
+
+	acts[MC_THREAD_SIG] = oldhnd;
 
 	pid_t pid = syscall(SYS_getpid);
 	syscall(SYS_kill, mytid, SIGABRT, 1313, mytid);
@@ -283,13 +295,6 @@ static void mc_sighnd(int sig) {
 }
 
 int minicriu_register_new_thread(void) {
-
-	struct sigaction new;
-	new.sa_handler = mc_sighnd;
-	if (sigaction(MC_THREAD_SIG, &new, NULL)) {
-		perror("sigaction");
-		return 1;
-	}
 
 	sigset_t set;
 	sigemptyset(&set);
