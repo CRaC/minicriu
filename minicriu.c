@@ -33,6 +33,7 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <unistd.h>
+#include <pthread.h>
 #include <signal.h>
 #include <sched.h>
 #include <sys/mman.h>
@@ -56,6 +57,11 @@ static struct elf_prstatus *prstatus[MAX_THREADS];
 static struct user_fpregs_struct *prfpreg[MAX_THREADS];
 static char stack[MAX_THREADS][4 * 4096];
 
+static pthread_mutex_t thread_mutex = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t thread_cond = PTHREAD_COND_INITIALIZER;
+static uint32_t thread_restored;
+static uint32_t all_thread_restored;
+
 static size_t elfsz;
 static void *rawelf;
 
@@ -67,6 +73,14 @@ static void arch_prctl(int code, unsigned long addr) {
 }
 
 static void restore(int sig, siginfo_t *info, void *ctx) {
+	if (!all_thread_restored) {
+		pthread_mutex_lock(&thread_mutex);
+		if (!--thread_restored) {
+			pthread_cond_signal(&thread_cond);
+		}
+		pthread_mutex_unlock(&thread_mutex);
+	}
+
 	ucontext_t *uc = (ucontext_t *) ctx;
 
 	greg_t *gregs = uc->uc_mcontext.gregs;
@@ -307,9 +321,28 @@ int main(int argc, char *argv[]) {
 #else
 		if (-1 == clone(clonefn, stack[i] + sizeof(stack[i]), flags, (void*)(uintptr_t)i)) {
 			perror("clone");
+		} else {
+			pthread_mutex_lock(&thread_mutex);
+			thread_restored++;
+			pthread_mutex_unlock(&thread_mutex);
 		}
 #endif
 	}
+
+	/*
+	* 	Here we synchronize the restoration of threads so their
+	*	SIGSIS signal handler was not replaced by old one
+	*	after the current thread recovery.
+	*/
+
+	pthread_mutex_lock(&thread_mutex);
+	pthread_cond_wait(&thread_cond, &thread_mutex);
+	pthread_mutex_unlock(&thread_mutex);
+
+	pthread_mutex_destroy(&thread_mutex);
+	pthread_cond_destroy(&thread_cond);
+	all_thread_restored = 1; /* do not use mutex after it has been destroyed */
+
 	clonefn((void*)(uintptr_t)0);
 	fprintf(stderr, "should not reach here\n");
 	return 0;
