@@ -183,12 +183,12 @@ int main(int argc, char *argv[]) {
 		if (ph->p_type != PT_LOAD) {
 			continue;
 		}
-		if (munmap((void*)ph->p_vaddr, ph->p_filesz)) {
+		if (munmap((void*)ph->p_vaddr, ph->p_memsz)) {
 			/*perror("munmap");*/
 		}
 		void *addr = mmap((void*)ph->p_vaddr,
-				ph->p_filesz,
-				PROT_READ | PROT_WRITE | PROT_EXEC,
+				ph->p_memsz,
+				PROT_WRITE,
 				MAP_PRIVATE | MAP_FIXED | MAP_ANONYMOUS,
 				-1, 0);
 		if (addr != (void*)ph->p_vaddr) {
