@@ -272,6 +272,12 @@ int main(int argc, char *argv[]) {
 			continue;
 		}
 		pread(fd, (void*)ph->p_vaddr, ph->p_filesz, ph->p_offset);
+
+		int mprot = 0;
+		mprot |= ph->p_flags & PF_R ? PROT_READ : 0;
+		mprot |= ph->p_flags & PF_W ? PROT_WRITE : 0;
+		mprot |= ph->p_flags & PF_X ? PROT_EXEC : 0;
+		mprotect((void*)ph->p_vaddr, ph->p_memsz, mprot);
 	}
 
 	struct sigaction sa = {
