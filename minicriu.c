@@ -57,10 +57,7 @@ static struct elf_prstatus *prstatus[MAX_THREADS];
 static struct user_fpregs_struct *prfpreg[MAX_THREADS];
 static char stack[MAX_THREADS][4 * 4096];
 
-static pthread_mutex_t thread_mutex = PTHREAD_MUTEX_INITIALIZER;
-static pthread_cond_t thread_cond = PTHREAD_COND_INITIALIZER;
-static uint32_t thread_restored;
-static uint32_t all_thread_restored;
+static pthread_barrier_t thread_barrier;
 
 static size_t elfsz;
 static void *rawelf;
@@ -73,14 +70,6 @@ static void arch_prctl(int code, unsigned long addr) {
 }
 
 static void restore(int sig, siginfo_t *info, void *ctx) {
-	if (!all_thread_restored) {
-		pthread_mutex_lock(&thread_mutex);
-		if (!--thread_restored) {
-			pthread_cond_signal(&thread_cond);
-		}
-		pthread_mutex_unlock(&thread_mutex);
-	}
-
 	ucontext_t *uc = (ucontext_t *) ctx;
 
 	greg_t *gregs = uc->uc_mcontext.gregs;
@@ -118,6 +107,18 @@ static void restore(int sig, siginfo_t *info, void *ctx) {
 	/*gregs[REG_] = uregs->es;*/
 	/*gregs[REG_] = uregs->fs;*/
 	/*gregs[REG_] = uregs->gs;*/
+
+	/*
+	* 	Here we synchronize the restoration of threads so their
+	*	SIGSIS signal handler was not replaced by old one
+	*	after the current thread recovery.
+	*/
+
+	pthread_barrier_wait(&thread_barrier);
+
+	if (!thread_id) {
+		pthread_barrier_destroy(&thread_barrier);
+	}
 
 #if 0
 	if (thread_id == 0) {
@@ -298,6 +299,8 @@ int main(int argc, char *argv[]) {
 		return 1;
 	}
 
+	pthread_barrier_init(&thread_barrier, NULL, thread_n);
+
 	for (int i = 1; i < thread_n; ++i) {
 		const int flags = CLONE_VM | CLONE_FS | CLONE_FILES | CLONE_SYSVSEM
                            | CLONE_SIGHAND | CLONE_THREAD;
@@ -321,27 +324,9 @@ int main(int argc, char *argv[]) {
 #else
 		if (-1 == clone(clonefn, stack[i] + sizeof(stack[i]), flags, (void*)(uintptr_t)i)) {
 			perror("clone");
-		} else {
-			pthread_mutex_lock(&thread_mutex);
-			thread_restored++;
-			pthread_mutex_unlock(&thread_mutex);
 		}
 #endif
 	}
-
-	/*
-	* 	Here we synchronize the restoration of threads so their
-	*	SIGSIS signal handler was not replaced by old one
-	*	after the current thread recovery.
-	*/
-
-	pthread_mutex_lock(&thread_mutex);
-	pthread_cond_wait(&thread_cond, &thread_mutex);
-	pthread_mutex_unlock(&thread_mutex);
-
-	pthread_mutex_destroy(&thread_mutex);
-	pthread_cond_destroy(&thread_cond);
-	all_thread_restored = 1; /* do not use mutex after it has been destroyed */
 
 	clonefn((void*)(uintptr_t)0);
 	fprintf(stderr, "should not reach here\n");
