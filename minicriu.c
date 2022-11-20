@@ -116,10 +116,6 @@ static void restore(int sig, siginfo_t *info, void *ctx) {
 
 	pthread_barrier_wait(&thread_barrier);
 
-	if (!thread_id) {
-		pthread_barrier_destroy(&thread_barrier);
-	}
-
 #if 0
 	if (thread_id == 0) {
 		munmap(rawelf, elfsz);
