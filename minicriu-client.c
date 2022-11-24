@@ -44,6 +44,7 @@
 #include <linux/futex.h>
 
 #include "minicriu-client.h"
+#include "cleanup.h"
 
 #define MC_THREAD_SIG SIGSYS
 
@@ -134,6 +135,7 @@ int minicriu_dump(void) {
 
 	DIR* tasksdir = opendir("/proc/self/task/");
 	struct dirent *taskdent;
+	uint32_t thread_n = 0;
 	while ((taskdent = readdir(tasksdir))) {
 		if (taskdent->d_name[0] == '.') {
 			continue;
@@ -147,6 +149,7 @@ int minicriu_dump(void) {
 			/* don't touch premodorial thread */
 			continue;
 		}
+		thread_n++;
 		int r = syscall(SYS_tkill, tid, MC_THREAD_SIG);
 		__atomic_fetch_sub(&mc_futex_checkpoint, 1, __ATOMIC_SEQ_CST);
 	}
@@ -168,6 +171,7 @@ int minicriu_dump(void) {
 	}
 
 	acts[MC_THREAD_SIG] = oldhnd;
+	maps *initmaps = getmap();
 
 	pid_t pid = syscall(SYS_getpid);
 	syscall(SYS_kill, mytid, SIGABRT, 1313, mytid);
@@ -241,6 +245,21 @@ int minicriu_dump(void) {
 	mc_futex_restore = 1;
 	syscall(SYS_futex, &mc_futex_restore, FUTEX_WAKE, INT_MAX);
 
+	/*
+	*	Here we synchronize the threads so that we do not
+	*	munmap segments before the threads are restored
+	*/
+
+	while ((current_count = mc_futex_checkpoint) != thread_n) {
+		printf("curerent count = %d\n", current_count);
+		syscall(SYS_futex, &mc_futex_checkpoint, FUTEX_WAIT, current_count);
+	}
+
+	maps *newmaps = getmap();
+	cleanup(initmaps, newmaps);
+	freemap(initmaps);
+	freemap(newmaps);
+
 	volatile int thread_loop = 0;
 	while (thread_loop);
 
@@ -284,6 +303,9 @@ static void mc_sighnd(int sig) {
 			  "b"(tid)
 			: "memory");
 	}
+
+	__atomic_fetch_add(&mc_futex_checkpoint, 1, __ATOMIC_SEQ_CST);
+	syscall(SYS_futex, &mc_futex_checkpoint, FUTEX_WAKE, 1);
 
 	RESTORE_CTX(ctx);
 
