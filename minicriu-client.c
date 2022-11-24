@@ -251,7 +251,6 @@ int minicriu_dump(void) {
 	*/
 
 	while ((current_count = mc_futex_checkpoint) != thread_n) {
-		printf("curerent count = %d\n", current_count);
 		syscall(SYS_futex, &mc_futex_checkpoint, FUTEX_WAIT, current_count);
 	}
 
