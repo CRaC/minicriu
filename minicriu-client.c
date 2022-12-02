@@ -44,17 +44,33 @@
 #include <linux/futex.h>
 
 #include "minicriu-client.h"
-#include "cleanup.h"
 
 #define MC_THREAD_SIG SIGSYS
 
 static volatile uint32_t mc_futex_checkpoint;
 static volatile uint32_t mc_futex_restore;
 
+typedef struct maps maps;
+
 static void mc_sighnd(int sig);
+static maps *getmap();
+static void cleanup(maps *oldmap, maps *newmap);
+static void freemap(maps *map);
 
 struct savedctx {
 	unsigned long fsbase, gsbase;
+};
+
+struct maps {
+    maps *next;
+    void *start;
+    void *end;
+    char perms[8];
+    unsigned long offset;
+    unsigned int devmajor;
+    unsigned int devminor;
+    unsigned long inode;
+    char name[256];
 };
 
 #define SAVE_CTX(ctx) do { \
@@ -328,4 +344,81 @@ int minicriu_register_new_thread(void) {
 	return 0;
 }
 
+static maps *getmap() {
+    maps *map = NULL;
+    char line[512];
+    size_t size = 0;
+    FILE *proc_maps;
+    proc_maps = fopen("/proc/self/maps", "r");
 
+    if (!proc_maps)
+        return NULL;
+
+    while (fgets(line, sizeof(line), proc_maps)) {
+        char perms[8];
+        unsigned int devmajor, devminor;
+        unsigned long offset, inode;
+        void *addr_start, *addr_end;
+        int name_start = 0;
+        int name_end = 0;
+
+        if (sscanf(line, "%p-%p %7s %lx %u:%u %lu %n%*[^\n]%n",
+                   &addr_start, &addr_end, perms, &offset,
+                   &devmajor, &devminor, &inode,
+                   &name_start, &name_end) < 7) {
+            fclose(proc_maps);
+            freemap(map);
+            return NULL;
+        }
+        maps *curr = (maps*)malloc(sizeof(maps));
+
+        if (name_end > name_start) {
+            memcpy(curr->name, line + name_start, name_end - name_start);
+        }
+        curr->name[name_end - name_start] = '\0';
+
+        curr->start = addr_start;
+        curr->end = addr_end;
+        memcpy(curr->perms, perms, sizeof(curr->perms));
+        curr->devmajor = devmajor;
+        curr->devminor = devminor;
+        curr->inode = inode;
+        curr->offset = offset;
+
+        curr->next = map;
+        map = curr;
+    }
+    fclose(proc_maps);
+
+    return map;
+}
+
+static void cleanup(maps *oldmap, maps *newmap) {
+    while(newmap) {
+        int diff = 1;
+		maps *curr = oldmap;
+        while(curr) {
+            if (newmap->start == curr->start) {
+                diff = 0;
+                break;
+            }
+            curr = curr->next;
+        }
+
+        if (diff) {
+            if (munmap(newmap->start, newmap->end - newmap->start)) {
+                perror("munmap");
+            }
+        }
+        newmap = newmap->next;
+    }
+}
+
+static void freemap(maps *map) {
+    while(map) {
+        maps *curr = map;
+        map = map->next;
+		curr->next = NULL;
+        free(curr);
+    }
+}

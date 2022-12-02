@@ -33,9 +33,7 @@ minicriu.o : CFLAGS += -fPIE
 
 minicriu-client.o : CFLAGS += -fPIC
 
-cleanup.o : CFLAGS += -fPIC
-
-libminicriu-client.a : minicriu-client.o  cleanup.o
+libminicriu-client.a : minicriu-client.o
 	ar rcs $@ $^
 
 test : test.o libminicriu-client.a libshared.so
