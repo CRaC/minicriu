@@ -49,6 +49,7 @@
 
 static volatile uint32_t mc_futex_checkpoint;
 static volatile uint32_t mc_futex_restore;
+static volatile uint32_t restored_threads;
 
 typedef struct maps maps;
 
@@ -151,7 +152,7 @@ int minicriu_dump(void) {
 
 	DIR* tasksdir = opendir("/proc/self/task/");
 	struct dirent *taskdent;
-	uint32_t thread_n = 0;
+	int thread_n = 0;
 	while ((taskdent = readdir(tasksdir))) {
 		if (taskdent->d_name[0] == '.') {
 			continue;
@@ -266,7 +267,7 @@ int minicriu_dump(void) {
 	*	munmap segments before the threads are restored
 	*/
 
-	while ((current_count = mc_futex_checkpoint) != thread_n) {
+	while ((current_count = restored_threads) != thread_n) {
 		syscall(SYS_futex, &mc_futex_checkpoint, FUTEX_WAIT, current_count);
 	}
 
@@ -319,8 +320,8 @@ static void mc_sighnd(int sig) {
 			: "memory");
 	}
 
-	__atomic_fetch_add(&mc_futex_checkpoint, 1, __ATOMIC_SEQ_CST);
-	syscall(SYS_futex, &mc_futex_checkpoint, FUTEX_WAKE, 1);
+	__atomic_fetch_add(&restored_threads, 1, __ATOMIC_SEQ_CST);
+	syscall(SYS_futex, &restored_threads, FUTEX_WAKE, 1);
 
 	RESTORE_CTX(ctx);
 
