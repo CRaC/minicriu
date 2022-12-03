@@ -46,33 +46,25 @@
 #include "minicriu-client.h"
 
 #define MC_THREAD_SIG SIGSYS
+#define MAX_MAPS 512
 
 static volatile uint32_t mc_futex_checkpoint;
 static volatile uint32_t mc_futex_restore;
 static volatile uint32_t restored_threads;
-
-typedef struct maps maps;
+int mapscnt;
 
 static void mc_sighnd(int sig);
-static maps *getmap();
-static void cleanup(maps *oldmap, maps *newmap);
-static void freemap(maps *map);
+static int getmap();
+static int cleanup();
 
 struct savedctx {
 	unsigned long fsbase, gsbase;
 };
 
-struct maps {
-    maps *next;
+struct map {
     void *start;
     void *end;
-    char perms[8];
-    unsigned long offset;
-    unsigned int devmajor;
-    unsigned int devminor;
-    unsigned long inode;
-    char name[256];
-};
+} maps[MAX_MAPS];
 
 #define SAVE_CTX(ctx) do { \
 	asm volatile("rdfsbase %0" : "=r" (ctx.fsbase) : : "memory"); \
@@ -188,7 +180,8 @@ int minicriu_dump(void) {
 	}
 
 	acts[MC_THREAD_SIG] = oldhnd;
-	maps *initmaps = getmap();
+	if (getmap())
+		printf("failed to get maps from /proc/self/maps\n");
 
 	pid_t pid = syscall(SYS_getpid);
 	syscall(SYS_kill, mytid, SIGABRT, 1313, mytid);
@@ -271,10 +264,8 @@ int minicriu_dump(void) {
 		syscall(SYS_futex, &mc_futex_checkpoint, FUTEX_WAIT, current_count);
 	}
 
-	maps *newmaps = getmap();
-	cleanup(initmaps, newmaps);
-	freemap(initmaps);
-	freemap(newmaps);
+	if (cleanup())
+		printf("failed to clean up maps\n");
 
 	volatile int thread_loop = 0;
 	while (thread_loop);
@@ -345,81 +336,60 @@ int minicriu_register_new_thread(void) {
 	return 0;
 }
 
-static maps *getmap() {
-    maps *map = NULL;
-    char line[512];
-    size_t size = 0;
-    FILE *proc_maps;
-    proc_maps = fopen("/proc/self/maps", "r");
+static int getmap() {
+	char line[512];
+	mapscnt = 0;
+	FILE *proc_maps;
+	proc_maps = fopen("/proc/self/maps", "r");
 
-    if (!proc_maps)
-        return NULL;
+	if (!proc_maps)
+		return 1;
 
-    while (fgets(line, sizeof(line), proc_maps)) {
-        char perms[8];
-        unsigned int devmajor, devminor;
-        unsigned long offset, inode;
-        void *addr_start, *addr_end;
-        int name_start = 0;
-        int name_end = 0;
+	while (fgets(line, sizeof(line), proc_maps)) {
+		void *addr_start, *addr_end;
+		if (sscanf(line, "%p-%p*", &addr_start, &addr_end) < 2) {
+			fclose(proc_maps);
+			return 1;
+		}
 
-        if (sscanf(line, "%p-%p %7s %lx %u:%u %lu %n%*[^\n]%n",
-                   &addr_start, &addr_end, perms, &offset,
-                   &devmajor, &devminor, &inode,
-                   &name_start, &name_end) < 7) {
-            fclose(proc_maps);
-            freemap(map);
-            return NULL;
-        }
-        maps *curr = (maps*)malloc(sizeof(maps));
-
-        if (name_end > name_start) {
-            memcpy(curr->name, line + name_start, name_end - name_start);
-        }
-        curr->name[name_end - name_start] = '\0';
-
-        curr->start = addr_start;
-        curr->end = addr_end;
-        memcpy(curr->perms, perms, sizeof(curr->perms));
-        curr->devmajor = devmajor;
-        curr->devminor = devminor;
-        curr->inode = inode;
-        curr->offset = offset;
-
-        curr->next = map;
-        map = curr;
+		maps[mapscnt].start = addr_start;
+		maps[mapscnt++].end = addr_end;
     }
-    fclose(proc_maps);
+	fclose(proc_maps);
 
-    return map;
+	return 0;
 }
 
-static void cleanup(maps *oldmap, maps *newmap) {
-    while(newmap) {
-        int diff = 1;
-		maps *curr = oldmap;
-        while(curr) {
-            if (newmap->start == curr->start) {
-                diff = 0;
-                break;
-            }
-            curr = curr->next;
+static int cleanup() {
+	char line[512];
+	FILE *proc_maps;
+	proc_maps = fopen("/proc/self/maps", "r");
+
+	if (!proc_maps)
+		return 1;
+
+	while (fgets(line, sizeof(line), proc_maps)) {
+		void *addr_start, *addr_end;
+		if (sscanf(line, "%p-%p", &addr_start, &addr_end) < 2) {
+			fclose(proc_maps);
+			return 1;
         }
 
-        if (diff) {
-            if (munmap(newmap->start, newmap->end - newmap->start)) {
-                perror("munmap");
-            }
-        }
-        newmap = newmap->next;
-    }
-}
+		int diff = 1;
+		for(int i = 0; i < mapscnt; i++) {
+			if (addr_start == maps[i].start) {
+				diff = 0;
+				break;
+			}
+		}
 
-static void freemap(maps *map) {
-    while(map) {
-        maps *curr = map;
-        map = map->next;
-		curr->next = NULL;
-        free(curr);
-    }
+		if (diff) {
+			if (munmap(addr_start, addr_end - addr_start)) {
+				perror("munmap");
+			}
+		}
+	}
+	fclose(proc_maps);
+
+	return 0;
 }
