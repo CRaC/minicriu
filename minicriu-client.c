@@ -261,7 +261,7 @@ int minicriu_dump(void) {
 	*/
 
 	while ((current_count = restored_threads) != thread_n) {
-		syscall(SYS_futex, &mc_futex_checkpoint, FUTEX_WAIT, current_count);
+		syscall(SYS_futex, &restored_threads, FUTEX_WAIT, current_count);
 	}
 
 	if (cleanup())
