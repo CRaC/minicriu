@@ -33,6 +33,7 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <unistd.h>
+#include <pthread.h>
 #include <signal.h>
 #include <sched.h>
 #include <sys/mman.h>
@@ -55,6 +56,8 @@ static int thread_n;
 static struct elf_prstatus *prstatus[MAX_THREADS];
 static struct user_fpregs_struct *prfpreg[MAX_THREADS];
 static char stack[MAX_THREADS][4 * 4096];
+
+static pthread_barrier_t thread_barrier;
 
 static size_t elfsz;
 static void *rawelf;
@@ -104,6 +107,14 @@ static void restore(int sig, siginfo_t *info, void *ctx) {
 	/*gregs[REG_] = uregs->es;*/
 	/*gregs[REG_] = uregs->fs;*/
 	/*gregs[REG_] = uregs->gs;*/
+
+	/*
+	* 	Here we synchronize the restoration of threads so their
+	*	SIGSIS signal handler was not replaced by old one
+	*	after the current thread recovery.
+	*/
+
+	pthread_barrier_wait(&thread_barrier);
 
 #if 0
 	if (thread_id == 0) {
@@ -284,6 +295,8 @@ int main(int argc, char *argv[]) {
 		return 1;
 	}
 
+	pthread_barrier_init(&thread_barrier, NULL, thread_n);
+
 	for (int i = 1; i < thread_n; ++i) {
 		const int flags = CLONE_VM | CLONE_FS | CLONE_FILES | CLONE_SYSVSEM
                            | CLONE_SIGHAND | CLONE_THREAD;
@@ -310,6 +323,7 @@ int main(int argc, char *argv[]) {
 		}
 #endif
 	}
+
 	clonefn((void*)(uintptr_t)0);
 	fprintf(stderr, "should not reach here\n");
 	return 0;
