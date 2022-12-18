@@ -352,6 +352,11 @@ static int mc_getmap() {
 			return 1;
 		}
 
+		if (mc_mapscnt == MC_MAX_MAPS) {
+			fclose(proc_maps);
+			return 1;
+		}
+
 		maps[mc_mapscnt].start = addr_start;
 		maps[mc_mapscnt++].end = addr_end;
 	}
