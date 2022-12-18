@@ -354,7 +354,7 @@ static int mc_getmap() {
 
 		maps[mc_mapscnt].start = addr_start;
 		maps[mc_mapscnt++].end = addr_end;
-    }
+	}
 	fclose(proc_maps);
 
 	return 0;
@@ -373,7 +373,7 @@ static int mc_cleanup() {
 		if (sscanf(line, "%p-%p", &addr_start, &addr_end) < 2) {
 			fclose(proc_maps);
 			return 1;
-        }
+		}
 
 		int diff = 1;
 		for(int i = 0; i < mc_mapscnt; i++) {
