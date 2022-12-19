@@ -347,10 +347,18 @@ static int mc_getmap() {
 
 	while (fgets(line, sizeof(line), proc_maps)) {
 		void *addr_start, *addr_end;
-		if (sscanf(line, "%p-%p*", &addr_start, &addr_end) < 2) {
+		char mapname[256];
+		if (sscanf(line, "%p-%p %*s %*x %*d:%*d %*d %s",
+					&addr_start, &addr_end, mapname) < 2) {
 			fclose(proc_maps);
 			return 1;
 		}
+
+		/*
+		* there is no need to save [vsyscall] as it always
+		* maps to the same address in the kernel space
+		*/
+		if (!strncmp(mapname, "[vsyscall]", 10)) continue;
 
 		if (mc_mapscnt == MC_MAX_MAPS) {
 			fclose(proc_maps);
@@ -367,34 +375,33 @@ static int mc_getmap() {
 
 static int mc_cleanup() {
 	char line[512];
-	FILE *proc_maps;
-	proc_maps = fopen("/proc/self/maps", "r");
+	FILE *proc_maps = fopen("/proc/self/maps", "r");
+	void *last_map_start;
+	void *last_map_end;
 
-	if (!proc_maps)
-		return 1;
-
+	// find last segment mapped in user space
 	while (fgets(line, sizeof(line), proc_maps)) {
 		void *addr_start, *addr_end;
-		if (sscanf(line, "%p-%p", &addr_start, &addr_end) < 2) {
+		char mapname[256];
+		if (sscanf(line, "%p-%p %*s %*x %*d:%*d %*d %s",
+					&addr_start, &addr_end, mapname) < 2) {
 			fclose(proc_maps);
 			return 1;
 		}
 
-		int diff = 1;
-		for(int i = 0; i < mc_mapscnt; i++) {
-			if (addr_start == maps[i].start) {
-				diff = 0;
-				break;
-			}
-		}
-
-		if (diff) {
-			if (munmap(addr_start, addr_end - addr_start)) {
-				perror("munmap");
-			}
-		}
+		if (!strncmp(mapname, "[vsyscall]", 10)) continue;
+		last_map_start = addr_start;
+		last_map_end = addr_end;
 	}
 	fclose(proc_maps);
 
+	munmap(0, (size_t)maps[0].start);
+	for (int i = 0; i < mc_mapscnt - 1; i++) {
+		munmap(maps[i].end, maps[i + 1].start - maps[i].end);
+	}
+
+	if(maps[mc_mapscnt - 1].start < last_map_start) {
+		munmap(maps[mc_mapscnt - 1].end, last_map_end - maps[mc_mapscnt - 1].end);
+	}
 	return 0;
 }
