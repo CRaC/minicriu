@@ -32,6 +32,7 @@ minicriu : LDFLAGS += -static
 minicriu : LDLIBS += -lpthread
 minicriu.o : CFLAGS += -fPIE
 
+minicriu-client : LDLIBS += -lpthread
 minicriu-client.o : CFLAGS += -fPIC
 
 libminicriu-client.a : minicriu-client.o
