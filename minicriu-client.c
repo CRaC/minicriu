@@ -342,8 +342,10 @@ static int mc_getmap() {
 	FILE *proc_maps;
 	proc_maps = fopen("/proc/self/maps", "r");
 
-	if (!proc_maps)
+	if (!proc_maps) {
+		perror("open maps");
 		return 1;
+	}
 
 	while (fgets(line, sizeof(line), proc_maps)) {
 		void *addr_start, *addr_end;
@@ -351,6 +353,7 @@ static int mc_getmap() {
 		if (sscanf(line, "%p-%p %*s %*x %*d:%*d %*d %s",
 					&addr_start, &addr_end, mapname) < 2) {
 			fclose(proc_maps);
+			perror("maps sscanf");
 			return 1;
 		}
 
@@ -362,6 +365,7 @@ static int mc_getmap() {
 
 		if (mc_mapscnt == MC_MAX_MAPS) {
 			fclose(proc_maps);
+			perror("maps limit");
 			return 1;
 		}
 
@@ -386,6 +390,7 @@ static int mc_cleanup() {
 		if (sscanf(line, "%p-%p %*s %*x %*d:%*d %*d %s",
 					&addr_start, &addr_end, mapname) < 2) {
 			fclose(proc_maps);
+			perror("maps sscanf");
 			return 1;
 		}
 
