@@ -53,64 +53,35 @@
 #define MC_GET_REGISTERS SIGUSR1 
 #define MC_MAX_PHDRS 512
 #define MC_MAX_THREADS 64
+#define MC_OWNER_SIZE 5
 #define MC_NOTE_PADDING 4
 
- struct  nt_note {
- 	long count;
+struct  nt_note {
+	long count;
 	long page_size;
 	long descsz;
- 	struct filemap
- 	{
+	struct filemap
+	{
 		long start;
 		long end;
- 		long fileofs;
+		long fileofs;
 	} filemaps[MC_MAX_PHDRS];
 	char filepath[MC_MAX_PHDRS][512];
- } nt_file;
+} nt_file;
 
 Elf64_Ehdr ehdr;
 Elf64_Phdr phdr[MC_MAX_PHDRS];
 Elf64_Nhdr nhdr[MC_MAX_THREADS];
 struct elf_prstatus prstatus[MC_MAX_THREADS];
 
-static pthread_mutex_t mc_getregs_mutex;
-static volatile uint32_t mc_thread_counter;
-static volatile uint32_t mc_futex_thread_gregs;
-
-static void mc_get_registers(int sig, siginfo_t *info, void *ctx) {
-	ucontext_t *uc = (ucontext_t *)ctx;
-	greg_t *gregs = uc->uc_mcontext.gregs;
-
-	pthread_mutex_lock(&mc_getregs_mutex); // it's enough to use mutex only for getting mc_thread_counter
-	printf("(%d) RIP = %llx\n", mc_thread_counter, gregs[REG_RIP]);
-	struct user_regs_struct *uregs = (void *)prstatus[mc_thread_counter].pr_reg;
-	uregs->r15 = gregs[REG_R15];
-	uregs->r14 = gregs[REG_R14];
-	uregs->r13 = gregs[REG_R13];
-	uregs->r12 = gregs[REG_R12];
-	uregs->rbp = gregs[REG_RBP];
-	uregs->rbx = gregs[REG_RBX];
-	uregs->r11 = gregs[REG_R11];
-	uregs->r10 = gregs[REG_R10];
-	uregs->r9 = gregs[REG_R9];
-	uregs->r8 = gregs[REG_R8];
-	uregs->rax = gregs[REG_RAX];
-	uregs->rcx = gregs[REG_RCX];
-	uregs->rdx = gregs[REG_RDX];
-	uregs->rsi = gregs[REG_RSI];
-	uregs->rdi = gregs[REG_RDI];
-	uregs->rip = gregs[REG_RIP];
-	uregs->eflags = gregs[REG_EFL];
-	uregs->rsp = gregs[REG_RSP];
-	syscall(SYS_arch_prctl, ARCH_GET_FS, &(uregs->fs_base));
-	syscall(SYS_arch_prctl, ARCH_GET_GS, &(uregs->gs_base));
-
-	prstatus[mc_thread_counter++].pr_pid = syscall(SYS_gettid);
-	pthread_mutex_unlock(&mc_getregs_mutex);
-}
+static pthread_mutex_t mc_getregs_mutex = PTHREAD_MUTEX_INITIALIZER;;
+static pthread_barrier_t mc_thread_barrier;
+static volatile int mc_gregs_counter;
+static volatile int mc_thread_counter;
 
 static volatile uint32_t mc_futex_checkpoint;
 static volatile uint32_t mc_futex_restore;
+static volatile uint32_t mc_barrier_initialization;
 
 static void mc_sighnd(int sig);
 
@@ -128,7 +99,7 @@ struct savedctx {
 	asm volatile("wrgsbase %0" : : "r" (ctx.gsbase) : "memory"); \
 } while(0)
 
-static pid_t* gettid_ptr(pthread_t thr) {
+static pid_t *gettid_ptr(pthread_t thr) {
 	const size_t header_size =
 #if defined(__x86_64__)
 		0x2c0;
@@ -174,6 +145,279 @@ static unsigned long align_up(unsigned long v, unsigned p) {
 	return (v + p - 1) & ~(p - 1);
 }
 
+static int mc_save_core_file() {
+
+	pid_t pid = syscall(SYS_getpid);
+	int phnum = 0;
+
+	// Create Elf header
+	memcpy(ehdr.e_ident, ELFMAG, SELFMAG);
+	ehdr.e_ident[EI_CLASS] = ELFCLASS64;
+	ehdr.e_ident[EI_DATA] = isLittleEndian() ? ELFDATA2LSB : ELFDATA2MSB;
+	ehdr.e_ident[EI_VERSION] = EV_CURRENT;
+	ehdr.e_ident[EI_OSABI] = ELFOSABI_SYSV;
+	ehdr.e_type = ET_CORE;
+	ehdr.e_machine = EM_X86_64;
+	ehdr.e_version = EV_CURRENT;
+	ehdr.e_entry = 0;
+	ehdr.e_phoff = sizeof(Elf64_Ehdr);
+	ehdr.e_shoff = 0;
+	ehdr.e_flags = 0;
+	ehdr.e_ehsize = sizeof(Elf64_Ehdr);
+	ehdr.e_phentsize = sizeof(Elf64_Phdr);
+	ehdr.e_phnum = 0;
+	ehdr.e_shentsize = 0;
+	ehdr.e_shnum = 0;
+	ehdr.e_shstrndx = 0;
+
+	// Create PT_NOTE phdr
+	phdr[phnum].p_type = PT_NOTE;
+	phdr[phnum].p_flags = 0;
+	phdr[phnum].p_offset = 0;
+	phdr[phnum].p_vaddr = 0;
+	phdr[phnum].p_paddr = 0;
+	phdr[phnum].p_memsz = 0;
+	phdr[phnum].p_filesz = 0;
+	phdr[phnum++].p_align = 0;
+
+	FILE *proc_maps = fopen("/proc/self/maps", "r");
+	if (proc_maps == NULL) {
+		printf("Coudnot open maps file. Failed to create checkpoint.\n");
+		return 1;
+	}
+
+	// Initialize NT_FILE
+	nt_file.descsz = 0;
+	nt_file.descsz += sizeof(nt_file.count) + sizeof(nt_file.page_size);
+	nt_file.page_size = 0x1000;
+
+	// Create PT_LOAD and NT_FILE phdrs
+	char buffer[256];
+	while (fgets(buffer, sizeof(buffer), proc_maps)) {
+		void *addr_start, *addr_end;
+		char perms[8];
+		long ofs;
+		int name_start = 0;
+		int name_end = 0;
+
+		int res = sscanf(buffer, "%p-%p %7s %lx %*d:%*d %*lx %n%*[^\n]%n", &addr_start,
+			&addr_end, perms, &ofs, &name_start, &name_end);
+
+		if (res < 4) {
+			perror("sscanf");
+			fclose(proc_maps);
+			return 1;
+		}
+
+		// [vsyscall] is mapped to the same address in each process
+		if (!strncmp(buffer + name_start, "[vsyscall]", sizeof("[vsyscall]") - 1)) {
+			continue;
+		}
+
+		// Save mapped files
+		if (name_end > name_start && *(buffer + name_start) != '[') {
+			int count = nt_file.count;
+			nt_file.filemaps[count].start = (long int)addr_start;
+			nt_file.filemaps[count].end = (long int)addr_end;
+			nt_file.filemaps[count].fileofs = ofs / nt_file.page_size;
+			memcpy(nt_file.filepath[count], buffer + name_start, name_end - name_start);
+			nt_file.filepath[count][name_end - name_start] = '\0';
+			nt_file.descsz += sizeof(struct filemap) + name_end - name_start + 1;
+			nt_file.count++;
+		}
+
+		phdr[phnum].p_type = PT_LOAD;
+		phdr[phnum].p_flags = 0;
+		phdr[phnum].p_flags |= perms[0] == 'r' ? PF_R : 0;
+		phdr[phnum].p_flags |= perms[1] == 'w' ? PF_W : 0;
+		phdr[phnum].p_flags |= perms[2] == 'x' ? PF_X : 0;
+		phdr[phnum].p_offset = 0;
+		phdr[phnum].p_vaddr = (long unsigned int)addr_start;
+		phdr[phnum].p_paddr = 0;
+		phdr[phnum].p_memsz = addr_end - addr_start;
+		phdr[phnum].p_filesz = phdr[phnum].p_flags != 0 ? addr_end - addr_start : 0;
+		phdr[phnum++].p_align = 0x1000;
+	}
+
+	fclose(proc_maps);
+
+	// Updating headers
+	ehdr.e_phnum = phnum;
+	int prstatus_sz = mc_thread_counter * (sizeof(Elf64_Nhdr) + sizeof(struct elf_prstatus) + align_up(MC_OWNER_SIZE, 4));
+	int ntfile_sz = sizeof(Elf64_Nhdr) + align_up(nt_file.descsz, 4) + align_up(MC_OWNER_SIZE, 4);
+	phdr[0].p_filesz = prstatus_sz + ntfile_sz;
+	phdr[0].p_offset = sizeof(Elf64_Ehdr) + ehdr.e_phnum * ehdr.e_phentsize;
+	for (int i = 1; i < phnum; i++) {
+		phdr[i].p_offset = align_up(phdr[i - 1].p_offset + phdr[i - 1].p_filesz, phdr[i].p_align);
+	}
+
+	char filename[32];
+	sprintf(filename, "minicriu-core.%d", pid);
+	FILE *coreFile = fopen(filename, "w+");
+	int bytesWritten = 0;
+
+	// Write elf header
+	fwrite(&ehdr, sizeof(Elf64_Ehdr), 1, coreFile);
+	bytesWritten += sizeof(Elf64_Ehdr);
+
+	// Write phdrs
+	fwrite(phdr, sizeof(Elf64_Phdr), phnum, coreFile);
+	bytesWritten += sizeof(Elf64_Phdr) * phnum;
+
+	char owner[] = "CORE"; // "CORE" gives more information while reading using readelf and eu-readelf tools
+	char paddingData[MC_NOTE_PADDING];
+	memset(paddingData, 0x00, MC_NOTE_PADDING);
+	int thread_counter = mc_thread_counter;
+
+	// Write PRSTATUS data for every process thread
+	int notes_size = 0;
+	for (int i = 0; i < thread_counter; i++) {
+		Elf64_Nhdr *cur_nhdr = &nhdr[i];
+
+		cur_nhdr->n_namesz = sizeof(owner);
+		cur_nhdr->n_descsz = sizeof(struct elf_prstatus);
+		cur_nhdr->n_type = NT_PRSTATUS;
+
+		fwrite(cur_nhdr, sizeof(Elf64_Nhdr), 1, coreFile);
+		bytesWritten += sizeof(Elf64_Nhdr);
+		notes_size += sizeof(Elf64_Nhdr);
+
+		fwrite(owner, sizeof(owner), 1, coreFile);
+		bytesWritten += sizeof(owner);
+		notes_size += sizeof(owner);
+
+		if (cur_nhdr->n_namesz % MC_NOTE_PADDING != 0) {
+			int padding = align_up(bytesWritten, MC_NOTE_PADDING) - bytesWritten;
+			fwrite(paddingData, padding, 1, coreFile);
+			bytesWritten += padding;
+			notes_size += padding;
+		}
+
+		fwrite(&prstatus[i], sizeof(struct elf_prstatus), 1, coreFile);
+		bytesWritten += sizeof(struct elf_prstatus);
+		notes_size += sizeof(struct elf_prstatus);
+
+		if (cur_nhdr->n_descsz % MC_NOTE_PADDING != 0) {
+			int padding = align_up(bytesWritten, MC_NOTE_PADDING) - bytesWritten;
+			fwrite(paddingData, padding, 1, coreFile);
+			bytesWritten += padding;
+			notes_size += padding;
+		}
+	}
+
+	// Write NT_FILE
+	Elf64_Nhdr *cur_nhdr = &nhdr[thread_counter];
+	cur_nhdr->n_namesz = sizeof(owner);
+	cur_nhdr->n_descsz = nt_file.descsz;
+	cur_nhdr->n_type = NT_FILE;
+
+	fwrite(cur_nhdr, sizeof(Elf64_Nhdr), 1, coreFile);
+	bytesWritten += sizeof(Elf64_Nhdr);
+	notes_size += sizeof(Elf64_Nhdr);
+
+	fwrite(owner, sizeof(owner), 1, coreFile);
+	bytesWritten += sizeof(owner);
+	notes_size += sizeof(owner);
+
+	if (cur_nhdr->n_namesz % MC_NOTE_PADDING != 0) {
+		int padding = align_up(bytesWritten, MC_NOTE_PADDING) - bytesWritten;
+		fwrite(paddingData, padding, 1, coreFile);
+		bytesWritten += padding;
+		notes_size += padding;
+	}
+
+	fwrite(&nt_file, sizeof(nt_file.count) + sizeof(nt_file.page_size), 1, coreFile);
+	fwrite(&nt_file.filemaps, sizeof(struct filemap), nt_file.count, coreFile);
+	for (int i = 0; i < nt_file.count; i++) {
+		fputs(nt_file.filepath[i], coreFile);
+		fputc('\0', coreFile);
+	}
+
+	if (cur_nhdr->n_descsz % MC_NOTE_PADDING != 0) {
+		int padding = align_up(bytesWritten, MC_NOTE_PADDING) - bytesWritten;
+		fwrite(paddingData, padding, 1, coreFile);
+		bytesWritten += padding;
+		notes_size += padding;
+	}
+
+	// Write PT_LOAD
+	for (int i = 1; i < phnum; i++) {
+		if (phdr[i].p_filesz != 0) {
+			int padding = phdr[i].p_offset - (phdr[i - 1].p_offset + phdr[i - 1].p_filesz);
+			if (padding > 0) {
+				fwrite(paddingData, sizeof(paddingData), padding / sizeof(paddingData), coreFile);
+				fwrite(paddingData, padding % sizeof(paddingData), 1, coreFile);
+			}
+
+			int written = fwrite((void *)phdr[i].p_vaddr, 1, phdr[i].p_filesz, coreFile);
+
+			if (written != phdr[i].p_filesz) {
+				perror("Failed write map content");
+
+				// As a temporary solution we fill the unwritten data with zeros
+				int leftdata = phdr[i].p_filesz - written;
+				int n = leftdata / sizeof(paddingData);
+
+				printf("%x/%lx. leftdata = %x n = %d\n", written, phdr[i].p_filesz, leftdata, n);
+				if (fwrite(paddingData, sizeof(paddingData), n, coreFile) != n) {
+					perror("Failed replace map content with zeroes");
+					continue;
+				}
+
+				leftdata = leftdata % sizeof(paddingData);
+
+				if (leftdata) {
+					if (fwrite(paddingData, leftdata, 1, coreFile)) {
+						perror("Failed replace map content with zeroes");
+					}
+				}
+			}
+		}
+	}
+
+	fclose(coreFile);
+	return 0;
+}
+
+static void mc_make_core(int sig, siginfo_t *info, void *ctx) {
+	ucontext_t *uc = (ucontext_t *)ctx;
+	greg_t *gregs = uc->uc_mcontext.gregs;
+	int thread_id = gregs[REG_RDX]; // get extra argument
+
+	struct user_regs_struct *uregs = (void *)prstatus[thread_id].pr_reg;
+	uregs->r15 = gregs[REG_R15];
+	uregs->r14 = gregs[REG_R14];
+	uregs->r13 = gregs[REG_R13];
+	uregs->r12 = gregs[REG_R12];
+	uregs->rbp = gregs[REG_RBP];
+	uregs->rbx = gregs[REG_RBX];
+	uregs->r11 = gregs[REG_R11];
+	uregs->r10 = gregs[REG_R10];
+	uregs->r9 = gregs[REG_R9];
+	uregs->r8 = gregs[REG_R8];
+	uregs->rax = gregs[REG_RAX];
+	uregs->rcx = gregs[REG_RCX];
+	uregs->rdx = gregs[REG_RDX];
+	uregs->rsi = gregs[REG_RSI];
+	uregs->rdi = gregs[REG_RDI];
+	uregs->rip = gregs[REG_RIP];
+	uregs->eflags = gregs[REG_EFL];
+	uregs->rsp = gregs[REG_RSP];
+	syscall(SYS_arch_prctl, ARCH_GET_FS, &(uregs->fs_base));
+	syscall(SYS_arch_prctl, ARCH_GET_GS, &(uregs->gs_base));
+
+	prstatus[thread_id].pr_pid = syscall(SYS_gettid);
+
+	// Wait until all threads save their registers
+	pthread_barrier_wait(&mc_thread_barrier);
+	if (thread_id == mc_thread_counter - 1) {
+		mc_save_core_file();
+	}
+
+	// Wait for all data to be saved. Otherwise the stack data will probably be corrupted.
+	pthread_barrier_wait(&mc_thread_barrier);
+}
+
 int minicriu_dump(void) {
 
 	pid_t mytid = syscall(SYS_gettid);
@@ -196,27 +440,27 @@ int minicriu_dump(void) {
 	struct savedctx ctx;
 	SAVE_CTX(ctx);
 
-	struct sigaction newhnd = { .sa_handler = mc_sighnd };
-	struct sigaction get_regs_hnd = { 
-		.sa_sigaction = mc_get_registers,
+	struct sigaction newhnd1 = { .sa_handler = mc_sighnd };
+	struct sigaction newhnd2 = {
+		.sa_sigaction = mc_make_core,
 		.sa_flags = SA_SIGINFO
 	};
 
-	struct sigaction oldhnd;
-	struct sigaction old_get_regs_hnd;
+	struct sigaction oldhnd1;
+	struct sigaction oldhnd2;
 
-	if (sigaction(MC_THREAD_SIG, &newhnd, &oldhnd)) {
+	if (sigaction(MC_THREAD_SIG, &newhnd1, &oldhnd1)) {
 		perror("sigaction");
 		return 1;
 	}
 
-	if (sigaction(MC_GET_REGISTERS, &get_regs_hnd, &old_get_regs_hnd)) {
-		perror("sigaction get registers handler");
+	if (sigaction(MC_GET_REGISTERS, &newhnd2, &oldhnd2)) {
+		perror("sigaction");
 		return 1;
 	}
 
-	int thread_count = 0;
-	DIR* tasksdir = opendir("/proc/self/task/");
+	int thread_counter = 0;
+	DIR *tasksdir = opendir("/proc/self/task/");
 	struct dirent *taskdent;
 	while ((taskdent = readdir(tasksdir))) {
 		if (taskdent->d_name[0] == '.') {
@@ -233,270 +477,46 @@ int minicriu_dump(void) {
 		}
 		int r = syscall(SYS_tkill, tid, MC_THREAD_SIG);
 		__atomic_fetch_sub(&mc_futex_checkpoint, 1, __ATOMIC_SEQ_CST);
-		thread_count++;
+		thread_counter++;
 	}
 	closedir(tasksdir);
+
+	mc_thread_counter = thread_counter + 1;
+	printf("thread_counter = %d\n", thread_counter);
 
 	uint32_t current_count;
 	while ((current_count = mc_futex_checkpoint) != 0) {
 		syscall(SYS_futex, &mc_futex_checkpoint, FUTEX_WAIT, current_count);
 	}
 
+	// Initialize barrier
+	pthread_barrier_init(&mc_thread_barrier, NULL, mc_thread_counter);
+
+	// Say to other threads that barrier is initialized
+	__atomic_fetch_add(&mc_barrier_initialization, 1, __ATOMIC_SEQ_CST);
+	syscall(SYS_futex, &mc_barrier_initialization, FUTEX_WAKE, thread_counter);
+
 	pid_t pid = syscall(SYS_getpid);
-	int phnum = 0;
 
-	// Creating Elf header
-	memcpy(ehdr.e_ident, ELFMAG, SELFMAG); // Set magic number
-	ehdr.e_ident[EI_CLASS] = ELFCLASS64;
-	ehdr.e_ident[EI_DATA] = isLittleEndian() ? ELFDATA2LSB : ELFDATA2MSB;
-	ehdr.e_ident[EI_VERSION] = EV_CURRENT;
-	ehdr.e_ident[EI_OSABI] = ELFOSABI_SYSV; // Maybe i should determine real ABI ?
-	ehdr.e_type = ET_CORE;
-	ehdr.e_machine = EM_X86_64; // ????
-	ehdr.e_version = EV_CURRENT; // always EV_CURRENT
-	ehdr.e_entry = 0; // That's not an executable ELF
-	ehdr.e_phoff = sizeof(Elf64_Ehdr); // Program header offset
-	ehdr.e_shoff = 0; // That core file will not have sections headers
-	ehdr.e_flags = 0; // ???
-	ehdr.e_ehsize = sizeof(Elf64_Ehdr);
-	ehdr.e_phentsize = sizeof(Elf64_Phdr);
-	ehdr.e_phnum = 0; // number of program headers (UPDATE)
-	ehdr.e_shentsize = 0; // does not use sections
-	ehdr.e_shnum = 0; // does not use sections
-	ehdr.e_shstrndx = 0; // does not use sections
+	// Save registers
+	pthread_mutex_lock(&mc_getregs_mutex);
+	int extra_arg = mc_gregs_counter++;
+	pthread_mutex_unlock(&mc_getregs_mutex);
+	int r = syscall(SYS_tkill, syscall(SYS_gettid), MC_GET_REGISTERS, extra_arg);
 
-	// Creating PT_NOTE program header
-	phdr[phnum].p_type = PT_NOTE;
-	phdr[phnum].p_flags = 0;
-	phdr[phnum].p_offset = 0; // size of header + size of all phrds (UPDATE)
-	phdr[phnum].p_vaddr = 0;
-	phdr[phnum].p_paddr = 0;
-	phdr[phnum].p_memsz = 0;
-	phdr[phnum].p_filesz = 0; // to update
-	phdr[phnum++].p_align = 0;
-
-	// Open /proc/self/maps to read process memory
-	FILE *proc_maps = fopen("/proc/self/maps", "r");
-	if (proc_maps == NULL) {
-		printf("Coudnot open maps file\n");
-		return 0;
-	} else {
-		printf("File was open!!!\n");
-	}
-
-	// NT_FILE initializaiton
-	nt_file.descsz = 0;
-	nt_file.descsz += sizeof(nt_file.count) + sizeof(nt_file.page_size);
-	nt_file.page_size =  0x1000;
-
-	// Creating PT_LOAD and NT_FILE
-	char buffer[256];
-	while (fgets(buffer, sizeof(buffer), proc_maps)) {
-		void *addr_start, *addr_end;
-		char perms[8];
-		long ofs;
-		int name_start = 0;
-		int name_end = 0;
-
-		int res = sscanf(buffer, "%p-%p %7s %lx %*d:%*d %*lx %n%*[^\n]%n", &addr_start, 
-			&addr_end, perms, &ofs, &name_start, &name_end);
-		
-		if (res < 4) {
-			perror("sscanf");
-			fclose(proc_maps);
-			return 1;
-		}
-
-		// [vsyscall] is mapped to the same address in each process
-		if (!strncmp(buffer + name_start, "[vsyscall]", sizeof("[vsyscall]") - 1)) {
-			continue;
-		}
-
-		if (name_end > name_start && *(buffer + name_start) != '[') {
-			// information for PT_NOTE
-			int count = nt_file.count;
-			nt_file.filemaps[count].start = (long int)addr_start;
-			nt_file.filemaps[count].end = (long int)addr_end;
-			nt_file.filemaps[count].fileofs = ofs / nt_file.page_size;
-			memcpy(nt_file.filepath[count], buffer + name_start, name_end - name_start);
-			nt_file.filepath[count][name_end - name_start] = '\0';
-			nt_file.descsz += sizeof(struct filemap) + name_end - name_start + 1;
-			nt_file.count++;
-		}
-
-		// fill phdr
-		phdr[phnum].p_type = PT_LOAD;
-		phdr[phnum].p_flags = 0;
-		phdr[phnum].p_flags |= perms[0] == 'r' ? PF_R : 0;
-		phdr[phnum].p_flags |= perms[1] == 'w' ? PF_W : 0;
-		phdr[phnum].p_flags |= perms[2] == 'x' ? PF_X : 0;
-		phdr[phnum].p_offset = 0; // need to update
-		phdr[phnum].p_vaddr = (long unsigned int)addr_start;
-		phdr[phnum].p_paddr = 0;
-		phdr[phnum].p_memsz = addr_end - addr_start;
-		phdr[phnum].p_filesz = phdr[phnum].p_flags != 0 ? addr_end - addr_start : 0;
-		phdr[phnum++].p_align = 0x1000; // ????
-	}
-
-	fclose(proc_maps);
-
-	// Updating headers
-	ehdr.e_phnum = phnum;
-	// mannual count of pt_note size
-	phdr[0].p_filesz = sizeof(Elf64_Nhdr) + align_up(5, 4) + align_up(nt_file.descsz, 4) + (mc_thread_counter + 1) * (sizeof(Elf64_Nhdr) + sizeof(struct elf_prstatus) + align_up(5, 4));
-	// update headers phdrs informaiton
-	phdr[0].p_offset = sizeof(Elf64_Ehdr) + ehdr.e_phnum * ehdr.e_phentsize; // PT_NOTE
-	for (int i = 1; i < phnum; i++) { // PT_LOAD
-		// it's aligned at original core file
-		phdr[i].p_offset = align_up(phdr[i - 1].p_offset + phdr[i - 1].p_filesz, phdr[i].p_align);
-	}
-
-	// Create core file
-	char filename[32];
-	sprintf(filename, "minicriu-core.%d", pid);
-	FILE *coreFile = fopen(filename, "w+");
-	int bytesWritten = 0;
-
-	// write elf header
-	fwrite(&ehdr, sizeof(Elf64_Ehdr), 1, coreFile);
-	bytesWritten += sizeof(Elf64_Ehdr);
-
-	// Write phdrs
-	fwrite(phdr, sizeof(Elf64_Phdr), phnum, coreFile);
-	bytesWritten += sizeof(Elf64_Phdr) * phnum;
-
-	
-	// save main thread registers
-	pthread_t self = pthread_self();
-	pthread_kill(self, MC_GET_REGISTERS);
-
-	char owner[] = "CORE"; // "core" gives more information while reading using readelf and eu-readelf tools
-	char paddingData[MC_NOTE_PADDING];
-	memset(paddingData, 0x00, MC_NOTE_PADDING);
-	int thread_counter = mc_thread_counter;
-
-	// write pt_note PRSTATUS data for every program thread 
-	int notes_size = 0;
-	for (int i = 0; i < thread_counter; i++) {
-		Elf64_Nhdr *cur_nhdr = &nhdr[i];
-
-		cur_nhdr->n_namesz = sizeof(owner);
-		cur_nhdr->n_descsz = sizeof(struct elf_prstatus);
-		cur_nhdr->n_type = NT_PRSTATUS;
-
-		// write nhdr
-		fwrite(cur_nhdr, sizeof(Elf64_Nhdr), 1, coreFile);
-		bytesWritten += sizeof(Elf64_Nhdr);
-		notes_size += sizeof(Elf64_Nhdr);
-
-		// write name
-		fwrite(owner, sizeof(owner), 1, coreFile);
-		bytesWritten += sizeof(owner);
-		notes_size += sizeof(owner);
-
-
-		// add name padding
-		if (cur_nhdr->n_namesz % MC_NOTE_PADDING != 0) {
-			int padding = align_up(bytesWritten, MC_NOTE_PADDING) - bytesWritten;
-			fwrite(paddingData, padding, 1, coreFile);
-			bytesWritten += padding;
-			notes_size += padding;
-		}
-
-		// write desc
-		fwrite(&prstatus[i], sizeof(struct elf_prstatus), 1, coreFile);
-		bytesWritten += sizeof(struct elf_prstatus);
-		notes_size += sizeof(struct elf_prstatus);
-
-
-		// add desc padding
-		if (cur_nhdr->n_descsz % MC_NOTE_PADDING != 0) {
-			int padding = align_up(bytesWritten, MC_NOTE_PADDING) - bytesWritten;
-			fwrite(paddingData, padding, 1, coreFile);
-			bytesWritten += padding;
-			notes_size += padding;
-		}
-	}
-
-	// Creating NT_FILE
-	Elf64_Nhdr *cur_nhdr = &nhdr[thread_counter];
-	cur_nhdr->n_namesz = sizeof(owner);
-	cur_nhdr->n_descsz = nt_file.descsz;
-	cur_nhdr->n_type = NT_FILE;
-
-	// writing nhdr
-	fwrite(cur_nhdr, sizeof(Elf64_Nhdr), 1, coreFile);
-	bytesWritten += sizeof(Elf64_Nhdr);
-	notes_size += sizeof(Elf64_Nhdr);
-
-	// name
-	fwrite(owner, sizeof(owner), 1, coreFile);
-	bytesWritten += sizeof(owner);
-	notes_size += sizeof(owner);
-	// + padding
-	if (cur_nhdr->n_namesz % MC_NOTE_PADDING != 0) {
-		int padding = align_up(bytesWritten, MC_NOTE_PADDING) - bytesWritten;
-		fwrite(paddingData, padding, 1, coreFile);
-		bytesWritten += padding;
-		notes_size += padding;
-	}
-
-	// desc
-	fwrite(&nt_file, sizeof(nt_file.count) + sizeof(nt_file.page_size), 1, coreFile);
-	fwrite(&nt_file.filemaps, sizeof(struct filemap), nt_file.count, coreFile);
-	for (int i = 0; i < nt_file.count; i++) {
-		fputs(nt_file.filepath[i], coreFile);
-		fputc('\0', coreFile);
-	}
-	// + padding
-	if (cur_nhdr->n_descsz % MC_NOTE_PADDING != 0) {
-		int padding = align_up(bytesWritten, MC_NOTE_PADDING) - bytesWritten;
-		fwrite(paddingData, padding, 1, coreFile);
-		bytesWritten += padding;
-		notes_size += padding;
-	}
-
-	// write PT_LOAD
-	for (int i = 1; i < phnum; i++) {
-		if (phdr[i].p_filesz != 0) {
-			int padding = phdr[i].p_offset - (phdr[i - 1].p_offset + phdr[i - 1].p_filesz);
-			if (padding > 0) {
-				// add padding for alignment
-				fwrite(paddingData, sizeof(paddingData), padding / sizeof(paddingData), coreFile);
-				fwrite(paddingData, padding % sizeof(paddingData), 1, coreFile);
-			}
-			fwrite((void *)phdr[i].p_vaddr, phdr[i].p_filesz, 1, coreFile);
-		}
-	}
-
-	fclose(coreFile);
-	printf("Writing has ended!\n");
-	
-	struct sigaction acts[SIGRTMAX];
-	struct sigaction new = { .sa_handler = SIG_DFL };
-	for (int i = 1; i < SIGRTMAX; ++i) {
-		if (sigaction(i, &new, &acts[i])) {
-			char msg[256];
-			snprintf(msg, sizeof(msg), "sigaction checkpoint %d: %m", i);
-			fprintf(stderr, "%s\n", msg);
-		}
-	}
-
-	acts[MC_THREAD_SIG] = oldhnd;
-	acts[MC_GET_REGISTERS] = old_get_regs_hnd;
-	printf("Making an abort\n");;
-	syscall(SYS_kill, mytid, SIGABRT, 1313, mytid);
 	RESTORE_CTX(ctx);
 
 	int newtid = syscall(SYS_gettid);
 	*gettid_ptr(pthread_self()) = newtid;
 
-	for (int i = 1; i < SIGRTMAX; ++i) {
-		if (sigaction(i, &acts[i], NULL)) {
-			char msg[256];
-			snprintf(msg, sizeof(msg), "sigaction restore %d: %m", i);
-			fprintf(stderr, "%s\n", msg);
-		}
+	if (sigaction(MC_THREAD_SIG, &oldhnd1, NULL)) {
+		perror("sigaction");
+		return 1;
+	}
+
+	if (sigaction(MC_GET_REGISTERS, &oldhnd2, NULL)) {
+		perror("sigaction");
+		return 1;
 	}
 
 	if ((0 < auxvlen) && (prctl(PR_SET_MM, PR_SET_MM_AUXV, auxv, auxvlen, 0) < 0)) {
@@ -564,6 +584,9 @@ int minicriu_dump(void) {
 
 static void mc_sighnd(int sig) {
 
+	__atomic_fetch_add(&mc_futex_checkpoint, 1, __ATOMIC_SEQ_CST);
+	syscall(SYS_futex, &mc_futex_checkpoint, FUTEX_WAKE, 1);
+
 	struct savedctx ctx;
 	SAVE_CTX(ctx);
 	int tid = syscall(SYS_gettid);
@@ -580,10 +603,18 @@ static void mc_sighnd(int sig) {
 
 	assert(*gettid_ptr(pthread_self()) == tid);
 
-	// save registers
-	pthread_kill(self, MC_GET_REGISTERS);
-	__atomic_fetch_add(&mc_futex_checkpoint, 1, __ATOMIC_SEQ_CST);
-	syscall(SYS_futex, &mc_futex_checkpoint, FUTEX_WAKE, 1);
+	// Make sure that barrier was initialized
+	uint32_t current_count;
+	while ((current_count = mc_barrier_initialization) == 0) {
+		syscall(SYS_futex, &mc_barrier_initialization, FUTEX_WAIT, current_count);
+	}
+
+	// Save registers
+	pthread_mutex_lock(&mc_getregs_mutex);
+	int extra_arg = mc_gregs_counter++;
+	pthread_mutex_unlock(&mc_getregs_mutex);
+	int r = syscall(SYS_tkill, syscall(SYS_gettid), MC_GET_REGISTERS, extra_arg);
+
 
 	while (!mc_futex_restore) {
 		// syscall sets thread-local errno while thread-local
