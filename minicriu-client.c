@@ -394,6 +394,7 @@ static int mc_cleanup() {
 			return 1;
 		}
 
+		// location of [vsyscall] page is fixed in the kernel ABI
 		if (!strncmp(mapname, "[vsyscall]", 10)) continue;
 		last_map_start = addr_start;
 		last_map_end = addr_end;
