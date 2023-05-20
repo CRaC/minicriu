@@ -56,6 +56,15 @@
 #define MC_OWNER_SIZE 5
 #define MC_NOTE_PADDING 4
 
+ // Enable or disable debug logging
+#define DEBUG 0
+
+#if DEBUG
+	#define debug_log(fmt, ...) printf(fmt, ##__VA_ARGS__)
+#else
+	#define debug_log
+#endif
+
 struct  nt_note {
 	long count;
 	long page_size;
@@ -423,7 +432,7 @@ int minicriu_dump(void) {
 	pid_t mytid = syscall(SYS_gettid);
 	pid_t mypid = getpid();
 
-	printf("minicriu thread %d\n", mytid);
+	debug_log("minicriu thread %d\n", mytid);
 
 	char auxv[1024];
 	int auxvlen = readfile("/proc/self/auxv", auxv, sizeof(auxv));
@@ -467,7 +476,7 @@ int minicriu_dump(void) {
 			continue;
 		}
 		int tid = atoi(taskdent->d_name);
-		printf("minicriu %d me %d\n", tid, mytid == tid);
+		debug_log("minicriu %d me %d\n", tid, mytid == tid);
 		if (tid == mytid) {
 			continue;
 		}
@@ -482,7 +491,7 @@ int minicriu_dump(void) {
 	closedir(tasksdir);
 
 	mc_thread_counter = thread_counter + 1;
-	printf("thread_counter = %d\n", thread_counter);
+	debug_log("thread_counter = %d\n", thread_counter);
 
 	uint32_t current_count;
 	while ((current_count = mc_futex_checkpoint) != 0) {
@@ -590,16 +599,14 @@ static void mc_sighnd(int sig) {
 	struct savedctx ctx;
 	SAVE_CTX(ctx);
 	int tid = syscall(SYS_gettid);
-	printf("(%d) fsbase %lx gsbase %lx\n", tid, ctx.fsbase, ctx.gsbase);
+	debug_log("(%d) fsbase %lx gsbase %lx\n", tid, ctx.fsbase, ctx.gsbase);
 
 	pthread_t self = pthread_self();
 	pid_t *tidptr = gettid_ptr(self);
 	pthread_kill(self, 0);
 
-	char buf[256];
-	int len = snprintf(buf, sizeof(buf), "%s: self %p tidptr %p *tidptr %d\n",
+	debug_log("%s: self %p tidptr %p *tidptr %d\n",
 		__func__, self, tidptr, *tidptr);
-	write(2, buf, len);
 
 	assert(*gettid_ptr(pthread_self()) == tid);
 
