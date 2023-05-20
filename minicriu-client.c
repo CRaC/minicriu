@@ -180,7 +180,7 @@ static int mc_save_core_file() {
 
 	FILE *proc_maps = fopen("/proc/self/maps", "r");
 	if (proc_maps == NULL) {
-		printf("Coudnot open maps file. Failed to create checkpoint.\n");
+		perror("Could not open maps file. Failed to create checkpoint.");
 		return 1;
 	}
 
@@ -202,7 +202,7 @@ static int mc_save_core_file() {
 			&addr_end, perms, &ofs, &name_start, &name_end);
 
 		if (res < 4) {
-			perror("sscanf");
+			perror("sscanf. Failed to create checkpoint.");
 			fclose(proc_maps);
 			return 1;
 		}
@@ -358,14 +358,17 @@ static int mc_save_core_file() {
 
 				int writtenZeroes = fwrite(paddingData, sizeof(paddingData), n, coreFile);
 				if (writtenZeroes != n) {
-					perror("Failed replace map content with zeroes.");
-					continue;
+					perror("Failed replace map content with zeroes. Failed to create checkpoint.");
+					fclose(proc_maps);
+					return 1;
 				}
 
 				leftData = leftData % sizeof(paddingData);
 				if (leftData) {
 					if (fwrite(paddingData, leftData, 1, coreFile)) {
-						perror("Failed replace map content with zeroes");
+						perror("Failed replace map content with zeroes. Failed to create checkpoint.");
+						fclose(proc_maps);
+						return 1;
 					}
 				}
 			}
