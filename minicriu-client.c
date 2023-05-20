@@ -265,8 +265,8 @@ static int mc_save_core_file() {
 	bytesWritten += sizeof(Elf64_Phdr) * phnum;
 
 	char owner[] = "CORE"; // "CORE" gives more information while reading using readelf and eu-readelf tools
-	char paddingData[MC_NOTE_PADDING];
-	memset(paddingData, 0x00, MC_NOTE_PADDING);
+	char paddingData[0x1000];
+	memset(paddingData, 0x0, 0x1000);
 	int thread_counter = mc_thread_counter;
 
 	// Write PRSTATUS data for every process thread
@@ -355,19 +355,18 @@ static int mc_save_core_file() {
 				perror("Failed write map content");
 
 				// As a temporary solution we fill the unwritten data with zeros
-				int leftdata = phdr[i].p_filesz - written;
-				int n = leftdata / sizeof(paddingData);
+				int leftData = phdr[i].p_filesz - written;
+				int n = leftData / sizeof(paddingData);
 
-				printf("%x/%lx. leftdata = %x n = %d\n", written, phdr[i].p_filesz, leftdata, n);
-				if (fwrite(paddingData, sizeof(paddingData), n, coreFile) != n) {
-					perror("Failed replace map content with zeroes");
+				int writtenZeroes = fwrite(paddingData, sizeof(paddingData), n, coreFile);
+				if (writtenZeroes != n) {
+					perror("Failed replace map content with zeroes.");
 					continue;
 				}
 
-				leftdata = leftdata % sizeof(paddingData);
-
-				if (leftdata) {
-					if (fwrite(paddingData, leftdata, 1, coreFile)) {
+				leftData = leftData % sizeof(paddingData);
+				if (leftData) {
+					if (fwrite(paddingData, leftData, 1, coreFile)) {
 						perror("Failed replace map content with zeroes");
 					}
 				}
