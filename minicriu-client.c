@@ -135,12 +135,6 @@ static int writefile(const char *file, const char *buf, size_t len) {
 	return bytes;
 }
 
-static int isLittleEndian() {
-	unsigned int x = 1;
-	char *c = (char *)&x;
-	return (int)*c;
-}
-
 static unsigned long align_up(unsigned long v, unsigned p) {
 	return (v + p - 1) & ~(p - 1);
 }
@@ -153,7 +147,11 @@ static int mc_save_core_file() {
 	// Create Elf header
 	memcpy(ehdr.e_ident, ELFMAG, SELFMAG);
 	ehdr.e_ident[EI_CLASS] = ELFCLASS64;
-	ehdr.e_ident[EI_DATA] = isLittleEndian() ? ELFDATA2LSB : ELFDATA2MSB;
+	#if __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
+	ehdr.e_ident[EI_DATA] = ELFDATA2LSB;
+	#else
+	ehdr.e_ident[EI_DATA] = ELFDATA2MSB;
+	#endif
 	ehdr.e_ident[EI_VERSION] = EV_CURRENT;
 	ehdr.e_ident[EI_OSABI] = ELFOSABI_SYSV;
 	ehdr.e_type = ET_CORE;
