@@ -65,19 +65,6 @@
 	#define debug_log
 #endif
 
-struct  nt_note {
-	long count;
-	long page_size;
-	long descsz;
-	struct filemap
-	{
-		long start;
-		long end;
-		long fileofs;
-	} filemaps[MC_MAX_PHDRS];
-	char filepath[MC_MAX_PHDRS][512];
-} nt_file;
-
 Elf64_Ehdr ehdr;
 Elf64_Phdr phdr[MC_MAX_PHDRS];
 Elf64_Nhdr nhdr[MC_MAX_THREADS];
@@ -192,6 +179,19 @@ static int mc_save_core_file() {
 		perror("Could not open maps file. Failed to create checkpoint.");
 		return 1;
 	}
+
+	struct  nt_note {
+		long count;
+		long page_size;
+		long descsz;
+		struct filemap
+		{
+			long start;
+			long end;
+			long fileofs;
+		} filemaps[MC_MAX_PHDRS];
+		char filepath[MC_MAX_PHDRS][512];
+	} nt_file;
 
 	// Initialize NT_FILE
 	nt_file.descsz = 0;
