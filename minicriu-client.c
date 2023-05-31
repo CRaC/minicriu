@@ -366,7 +366,7 @@ static int mc_save_core_file() {
 				int writtenZeroes = fwrite(paddingData, sizeof(paddingData), n, coreFile);
 				if (writtenZeroes != n) {
 					perror("Failed replace map content with zeroes. Failed to create checkpoint.");
-					fclose(proc_maps);
+					fclose(coreFile);
 					return 1;
 				}
 
@@ -374,7 +374,7 @@ static int mc_save_core_file() {
 				if (leftData) {
 					if (fwrite(paddingData, leftData, 1, coreFile)) {
 						perror("Failed replace map content with zeroes. Failed to create checkpoint.");
-						fclose(proc_maps);
+						fclose(coreFile);
 						return 1;
 					}
 				}
