@@ -83,7 +83,7 @@ Elf64_Phdr phdr[MC_MAX_PHDRS];
 Elf64_Nhdr nhdr[MC_MAX_THREADS];
 struct elf_prstatus prstatus[MC_MAX_THREADS];
 
-static pthread_mutex_t mc_getregs_mutex = PTHREAD_MUTEX_INITIALIZER;;
+static pthread_mutex_t mc_getregs_mutex = PTHREAD_MUTEX_INITIALIZER;
 static pthread_barrier_t mc_thread_barrier;
 static volatile int mc_gregs_counter;
 static volatile int mc_thread_counter;
