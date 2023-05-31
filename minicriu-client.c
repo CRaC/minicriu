@@ -255,6 +255,10 @@ static int mc_save_core_file() {
 	char filename[32];
 	sprintf(filename, "minicriu-core.%d", pid);
 	FILE *coreFile = fopen(filename, "w+");
+	if (coreFile == NULL) {
+		perror("Could not create file for minicriu dump. Failed to create checkpoint.");
+		return 1;
+	}
 	int bytesWritten = 0;
 
 	// Write elf header
