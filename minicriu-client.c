@@ -141,6 +141,7 @@ static int mc_save_core_file() {
 	int phnum = 0;
 
 	// Create Elf header
+	memset(&ehdr, 0, sizeof(ehdr));
 	memcpy(ehdr.e_ident, ELFMAG, SELFMAG);
 	ehdr.e_ident[EI_CLASS] = ELFCLASS64;
 	#if __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
@@ -153,16 +154,9 @@ static int mc_save_core_file() {
 	ehdr.e_type = ET_CORE;
 	ehdr.e_machine = EM_X86_64;
 	ehdr.e_version = EV_CURRENT;
-	ehdr.e_entry = 0;
 	ehdr.e_phoff = sizeof(Elf64_Ehdr);
-	ehdr.e_shoff = 0;
-	ehdr.e_flags = 0;
 	ehdr.e_ehsize = sizeof(Elf64_Ehdr);
 	ehdr.e_phentsize = sizeof(Elf64_Phdr);
-	ehdr.e_phnum = 0;
-	ehdr.e_shentsize = 0;
-	ehdr.e_shnum = 0;
-	ehdr.e_shstrndx = 0;
 
 	// Create PT_NOTE phdr
 	phdr[phnum].p_type = PT_NOTE;
