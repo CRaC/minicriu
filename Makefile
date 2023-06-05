@@ -1,15 +1,15 @@
 #  Copyright 2017-2022 Azul Systems, Inc.
-# 
+#
 #  Redistribution and use in source and binary forms, with or without
 #  modification, are permitted provided that the following conditions are met:
-# 
+#
 #  1. Redistributions of source code must retain the above copyright notice,
 #  this list of conditions and the following disclaimer.
-# 
+#
 #  2. Redistributions in binary form must reproduce the above copyright notice,
 #  this list of conditions and the following disclaimer in the documentation
 #  and/or other materials provided with the distribution.
-# 
+#
 #  THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
 #  AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
 #  IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
@@ -22,26 +22,24 @@
 #  ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
 #  POSSIBILITY OF SUCH DAMAGE.
 
-CFLAGS = -g -MMD -MT $@ -MF $@.d
+CFLAGS = -g -MMD -MT $@ -MF $@.d -fPIC
 ASFLAGS = $(CFLAGS)
 
-all : minicriu libminicriu-client.a
+all : minicriu libminicriu-client.a libminicriu.so
 
 minicriu : minicriu.o
 minicriu : LDFLAGS += -static
 minicriu : LDLIBS += -lpthread
-minicriu.o : CFLAGS += -fPIE
-
 minicriu-client : LDLIBS += -lpthread
-minicriu-client.o : CFLAGS += -fPIC
 
 libminicriu-client.a : minicriu-client.o
 	ar rcs $@ $^
 
+libminicriu.so: minicriu-client.o minicriu.o dynamic_api.o shared.o
+	$(LD) -shared -o $@ $^
+
 test : test.o libminicriu-client.a libshared.so
 test : LDLIBS += -lpthread
-
-shared.o : CFLAGS += -fPIC
 
 libshared.so : shared.o
 	$(LD) -shared -o $@ $<
@@ -69,6 +67,6 @@ run : minicriu core
 	readelf -a $< > $@
 
 clean :
-	rm -f minicriu test file core *.[aod]
+	rm -f minicriu test file core *.[aod] *.so minicriu-core.*
 
 -include $(wildcard *.d)

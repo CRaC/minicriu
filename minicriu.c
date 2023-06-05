@@ -28,6 +28,7 @@
 
 #include <assert.h>
 #include <alloca.h>
+#include <limits.h>
 #include <string.h>
 #include <stdint.h>
 #include <stdlib.h>
@@ -69,7 +70,7 @@ static void arch_prctl(int code, unsigned long addr) {
 	}
 }
 
-static void restore(int sig, siginfo_t *info, void *ctx) {
+static void restore_action(int sig, siginfo_t *info, void *ctx) {
 	ucontext_t *uc = (ucontext_t *) ctx;
 
 	greg_t *gregs = uc->uc_mcontext.gregs;
@@ -110,7 +111,7 @@ static void restore(int sig, siginfo_t *info, void *ctx) {
 
 	/*
 	* 	Here we synchronize the restoration of threads so their
-	*	SIGSIS signal handler was not replaced by old one
+	*	SIGSYS signal handler was not replaced by old one
 	*	after the current thread recovery.
 	*/
 
@@ -135,30 +136,34 @@ static unsigned long align_up(unsigned long v, unsigned p) {
 
 static int clonefn(void *arg) {
 	int r = syscall(SYS_tkill, syscall(SYS_gettid), SIGSYS,
-			/* extra arg to _signal handler_ */ arg);
+                       /* extra arg to _signal handler_ */ arg);
 	fprintf(stderr, "should not reach here (thread %d)\n", (int)(long)arg);
 	return 1;
 }
 
-int main(int argc, char *argv[]) {
-	const char* elfpath = argv[1];
+typedef void restore_handler();
+
+int minicriu_restore(const char *dir, restore_handler *on_restore) {
+	char elfpath[PATH_MAX];
+	snprintf(elfpath, PATH_MAX, "%s/core.img", dir);
 
 	int fd = open(elfpath, O_RDONLY);
 	if (fd < 0) {
-		perror("open");
+		perror("open minicriu dump");
+		fprintf(stderr, "Cannot open %s\n", elfpath);
 		return 1;
 	}
 
 	struct stat st;
 	if (fstat(fd, &st)) {
-		perror("stat");
+		perror("stat minicriu dump");
 		return 1;
 	}
 
 	elfsz = align_up(st.st_size, 4096);
 	rawelf = mmap(NULL, elfsz, PROT_READ, MAP_PRIVATE, fd, 0);
 	if (rawelf == MAP_FAILED) {
-		perror("mmap");
+		perror("mmap minicriu dump");
 		return 1;
 	}
 	const Elf64_Ehdr *ehdr = (const Elf64_Ehdr *) rawelf;
@@ -290,9 +295,10 @@ int main(int argc, char *argv[]) {
 		mprot |= ph->p_flags & PF_X ? PROT_EXEC : 0;
 		mprotect((void*)ph->p_vaddr, ph->p_memsz, mprot);
 	}
+	close(fd);
 
 	struct sigaction sa = {
-		.sa_sigaction = restore,
+		.sa_sigaction = restore_action,
 		.sa_flags = SA_SIGINFO
 	};
 	sigemptyset(&sa.sa_mask);
@@ -330,7 +336,15 @@ int main(int argc, char *argv[]) {
 #endif
 	}
 
+	if (on_restore != NULL) {
+		on_restore();
+	}
+
 	clonefn((void*)(uintptr_t)0);
 	fprintf(stderr, "should not reach here\n");
 	return 0;
+}
+
+int main(int argc, char *argv[]) {
+	minicriu_restore(argv[1], NULL);
 }

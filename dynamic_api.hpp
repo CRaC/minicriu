@@ -1,5 +1,5 @@
 /*
- * Copyright 2017-2022 Azul Systems, Inc.
+ * Copyright 2023 Azul Systems, Inc.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions are met:
@@ -24,24 +24,20 @@
  * POSSIBILITY OF SUCH DAMAGE.
  */
 
-#include <unistd.h>
-#include <sys/syscall.h>      /* Definition of SYS_* constants */
-#include <unistd.h>
+#pragma once
 
-#include "shared.h"
-
-volatile int __thread thr_local;
-
-static int gettid(void) {
-	return syscall(SYS_gettid);
-}
-
-int shared_fn(void) {
-	/**((int*)0) = 1;*/
-#if 0
-	if (!thr_local) {
-		thr_local = -gettid();
-	}
+#ifdef __cplusplus
+extern "C" {
 #endif
-	return thr_local;
-}
+
+typedef void signal_handler(int);
+
+extern int checkpoint(const char* const* args, bool stop_current, signal_handler *wrapper, signal_handler **handler_ptr);
+
+typedef void restore_handler();
+
+extern int restore(const char* const* args, restore_handler *on_restore);
+
+#ifdef __cplusplus
+} /* extern "C" */
+#endif

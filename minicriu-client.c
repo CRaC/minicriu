@@ -27,23 +27,26 @@
 #define _GNU_SOURCE
 
 #include <assert.h>
-#include <string.h>
-#include <stdio.h>
-#include <errno.h>
-#include <limits.h>
-#include <stdint.h>
-#include <stdlib.h>
-#include <unistd.h>
 #include <dirent.h>
+#include <errno.h>
+#include <fcntl.h>
+#include <limits.h>
+#include <linux/futex.h>
 #include <pthread.h>
 #include <signal.h>
-#include <fcntl.h>
-#include <sys/syscall.h>      /* Definition of SYS_* constants */
-#include <sys/prctl.h>
+#include <stdbool.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
 #include <sys/mman.h>
-#include <linux/futex.h>
+#include <sys/prctl.h>
 #include <sys/procfs.h>
-#include <pthread.h>
+#include <sys/stat.h>
+#include <sys/types.h>
+#include <sys/syscall.h>      /* Definition of SYS_* constants */
+#include <unistd.h>
+
 #include <elf.h>
 #include <asm/prctl.h>
 
@@ -82,10 +85,11 @@ static volatile uint32_t mc_restored_threads;
 int mc_mapscnt;
 static volatile uint32_t mc_barrier_initialization;
 
-
 static void mc_sighnd(int sig);
 static int mc_getmap();
 static int mc_cleanup();
+typedef void signal_handler(int);
+signal_handler *signal_wrapper = mc_sighnd;
 
 struct savedctx {
 	unsigned long fsbase, gsbase;
@@ -145,6 +149,8 @@ static int writefile(const char *file, const char *buf, size_t len) {
 static unsigned long align_up(unsigned long v, unsigned p) {
 	return (v + p - 1) & ~(p - 1);
 }
+
+static char mc_dump_path[PATH_MAX];
 
 static int mc_save_core_file() {
 
@@ -263,11 +269,12 @@ static int mc_save_core_file() {
 		phdr[i].p_offset = align_up(phdr[i - 1].p_offset + phdr[i - 1].p_filesz, phdr[i].p_align);
 	}
 
-	char filename[32];
-	sprintf(filename, "minicriu-core.%d", pid);
+	char filename[PATH_MAX + 10];
+	snprintf(filename, sizeof(filename), "%s/core.img", mc_dump_path);
 	FILE *coreFile = fopen(filename, "w+");
 	if (coreFile == NULL) {
-		perror("Could not create file for minicriu dump. Failed to create checkpoint.");
+		fprintf(stderr, "Could not create file %s for minicriu dump: %s. Failed to create checkpoint.\n",
+			filename, strerror(errno));
 		return 1;
 	}
 	int bytesWritten = 0;
@@ -444,7 +451,13 @@ static void mc_make_core(int sig, siginfo_t *info, void *ctx) {
 	pthread_barrier_wait(&mc_thread_barrier);
 }
 
-int minicriu_dump(void) {
+int minicriu_dump_internal(const char *path, signal_handler *wrapper, signal_handler **handler_ptr) {
+	snprintf(mc_dump_path, sizeof(mc_dump_path), "%s", path);
+
+	if (wrapper != NULL && handler_ptr != NULL) {
+		*handler_ptr = mc_sighnd;
+		signal_wrapper = wrapper;
+	}
 
 	pid_t mytid = syscall(SYS_gettid);
 	pid_t mypid = getpid();
@@ -466,7 +479,7 @@ int minicriu_dump(void) {
 	struct savedctx ctx;
 	SAVE_CTX(ctx);
 
-	struct sigaction newhnd1 = { .sa_handler = mc_sighnd };
+	struct sigaction newhnd1 = { .sa_handler = signal_wrapper };
 	struct sigaction newhnd2 = {
 		.sa_sigaction = mc_make_core,
 		.sa_flags = SA_SIGINFO
@@ -623,6 +636,16 @@ int minicriu_dump(void) {
 	return 0;
 }
 
+int minicriu_dump() {
+	pid_t mypid = getpid();
+	char path[PATH_MAX];
+	snprintf(path, sizeof(path), "./minicriu-dump.%d", mypid);
+	if (mkdir(path, 0777)) {
+		perror("mkdir dump directory");
+		return -1;
+	}
+	minicriu_dump_internal(path, NULL, NULL);
+}
 
 static void mc_sighnd(int sig) {
 
@@ -695,6 +718,14 @@ int minicriu_register_new_thread(void) {
 	}
 
 	return 0;
+}
+
+bool minicriu_is_restore() {
+	return false; // TODO: implement me
+}
+
+void minicriu_finalize_checkpoint() {
+	// TODO: implement me
 }
 
 static int mc_getmap() {
