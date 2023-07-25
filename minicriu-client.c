@@ -46,15 +46,25 @@
 #include "minicriu-client.h"
 
 #define MC_THREAD_SIG SIGSYS
+#define MC_MAX_MAPS 512
 
 static volatile uint32_t mc_futex_checkpoint;
 static volatile uint32_t mc_futex_restore;
+static volatile uint32_t mc_restored_threads;
+int mc_mapscnt;
 
 static void mc_sighnd(int sig);
+static int mc_getmap();
+static int mc_cleanup();
 
 struct savedctx {
 	unsigned long fsbase, gsbase;
 };
+
+struct mc_map {
+    void *start;
+    void *end;
+} maps[MC_MAX_MAPS];
 
 #define SAVE_CTX(ctx) do { \
 	asm volatile("rdfsbase %0" : "=r" (ctx.fsbase) : : "memory"); \
@@ -134,6 +144,7 @@ int minicriu_dump(void) {
 
 	DIR* tasksdir = opendir("/proc/self/task/");
 	struct dirent *taskdent;
+	int thread_n = 0;
 	while ((taskdent = readdir(tasksdir))) {
 		if (taskdent->d_name[0] == '.') {
 			continue;
@@ -147,6 +158,7 @@ int minicriu_dump(void) {
 			/* don't touch premodorial thread */
 			continue;
 		}
+		thread_n++;
 		int r = syscall(SYS_tkill, tid, MC_THREAD_SIG);
 		__atomic_fetch_sub(&mc_futex_checkpoint, 1, __ATOMIC_SEQ_CST);
 	}
@@ -168,6 +180,8 @@ int minicriu_dump(void) {
 	}
 
 	acts[MC_THREAD_SIG] = oldhnd;
+	if (mc_getmap())
+		printf("failed to get maps from /proc/self/maps\n");
 
 	pid_t pid = syscall(SYS_getpid);
 	syscall(SYS_kill, mytid, SIGABRT, 1313, mytid);
@@ -241,6 +255,18 @@ int minicriu_dump(void) {
 	mc_futex_restore = 1;
 	syscall(SYS_futex, &mc_futex_restore, FUTEX_WAKE, INT_MAX);
 
+	/*
+	*	Here we synchronize the threads so that we do not
+	*	munmap segments before the threads are restored
+	*/
+
+	while ((current_count = mc_restored_threads) != thread_n) {
+		syscall(SYS_futex, &mc_restored_threads, FUTEX_WAIT, current_count);
+	}
+
+	if (mc_cleanup())
+		printf("failed to clean up maps\n");
+
 	volatile int thread_loop = 0;
 	while (thread_loop);
 
@@ -285,6 +311,9 @@ static void mc_sighnd(int sig) {
 			: "memory");
 	}
 
+	__atomic_fetch_add(&mc_restored_threads, 1, __ATOMIC_SEQ_CST);
+	syscall(SYS_futex, &mc_restored_threads, FUTEX_WAKE, 1);
+
 	RESTORE_CTX(ctx);
 
 	int newtid = syscall(SYS_gettid);
@@ -307,4 +336,78 @@ int minicriu_register_new_thread(void) {
 	return 0;
 }
 
+static int mc_getmap() {
+	char line[512];
+	mc_mapscnt = 0;
+	FILE *proc_maps;
+	proc_maps = fopen("/proc/self/maps", "r");
 
+	if (!proc_maps) {
+		perror("open maps");
+		return 1;
+	}
+
+	while (fgets(line, sizeof(line), proc_maps)) {
+		void *addr_start, *addr_end;
+		char mapname[256];
+		if (sscanf(line, "%p-%p %*s %*x %*d:%*d %*d %s",
+					&addr_start, &addr_end, mapname) < 2) {
+			fclose(proc_maps);
+			perror("maps sscanf");
+			return 1;
+		}
+
+		/*
+		* there is no need to save [vsyscall] as it always
+		* maps to the same address in the kernel space
+		*/
+		if (!strncmp(mapname, "[vsyscall]", 10)) continue;
+
+		if (mc_mapscnt == MC_MAX_MAPS) {
+			fclose(proc_maps);
+			perror("maps limit");
+			return 1;
+		}
+
+		maps[mc_mapscnt].start = addr_start;
+		maps[mc_mapscnt++].end = addr_end;
+	}
+	fclose(proc_maps);
+
+	return 0;
+}
+
+static int mc_cleanup() {
+	char line[512];
+	FILE *proc_maps = fopen("/proc/self/maps", "r");
+	void *last_map_start;
+	void *last_map_end;
+
+	// find last segment mapped in user space
+	while (fgets(line, sizeof(line), proc_maps)) {
+		void *addr_start, *addr_end;
+		char mapname[256];
+		if (sscanf(line, "%p-%p %*s %*x %*d:%*d %*d %s",
+					&addr_start, &addr_end, mapname) < 2) {
+			fclose(proc_maps);
+			perror("maps sscanf");
+			return 1;
+		}
+
+		// location of [vsyscall] page is fixed in the kernel ABI
+		if (!strncmp(mapname, "[vsyscall]", 10)) continue;
+		last_map_start = addr_start;
+		last_map_end = addr_end;
+	}
+	fclose(proc_maps);
+
+	munmap(0, (size_t)maps[0].start);
+	for (int i = 0; i < mc_mapscnt - 1; i++) {
+		munmap(maps[i].end, maps[i + 1].start - maps[i].end);
+	}
+
+	if(maps[mc_mapscnt - 1].start < last_map_start) {
+		munmap(maps[mc_mapscnt - 1].end, last_map_end - maps[mc_mapscnt - 1].end);
+	}
+	return 0;
+}
