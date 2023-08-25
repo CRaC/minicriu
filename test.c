@@ -32,6 +32,7 @@
 #include <signal.h>
 #include <sys/fcntl.h>
 #include <sys/mman.h>
+#include <sys/stat.h>
 #include <sys/syscall.h>      /* Definition of SYS_* constants */
 
 #include "minicriu-client.h"
@@ -88,6 +89,13 @@ int main(int argc, char *argv[]) {
 		perror("open");
 		return 1;
 	}
+	struct stat st;
+	if (fstat(fd, &st)) {
+        perror("fstat");
+    } else if (st.st_size != 4096) {
+        fprintf(stderr, "Unexpected size; 'file' should be truncated to 4096 bytes\n");
+        return 1;
+    }
 
 	void *addr = mmap(NULL, 4096 * 1024, PROT_READ | PROT_WRITE, MAP_PRIVATE, fd, 0);
 	if (addr == MAP_FAILED) {

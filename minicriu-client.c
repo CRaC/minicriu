@@ -368,18 +368,26 @@ static int mc_save_core_file() {
 			int written = fwrite((void *)phdr[i].p_vaddr, 1, phdr[i].p_filesz, coreFile);
 
 			if (written != phdr[i].p_filesz) {
-				perror("Failed write map content");
-
-				// As a temporary solution we fill the unwritten data with zeros
-				int leftData = phdr[i].p_filesz - written;
-				int n = leftData / sizeof(paddingData);
-
-				int writtenZeroes = fwrite(paddingData, sizeof(paddingData), n, coreFile);
-				if (writtenZeroes != n) {
-					perror("Failed replace map content with zeroes. Failed to create checkpoint.");
-					fclose(coreFile);
-					return 1;
+			    // This happens when the mapping is larger than the mapped file (rounded up to page size)
+			    // - errno is EFAULT. Accessing that memory directly would result in SIGBUS.
+				if (errno != EFAULT) {
+				    perror("Failed write map content");
+				    return 1;
 				}
+
+				// We fill the unwritten data with zeros
+				int leftData = phdr[i].p_filesz - written;
+				do {
+				    int n = leftData < sizeof(paddingData) ? leftData : sizeof(paddingData);
+
+                    int writtenZeroes = fwrite(paddingData, 1, n, coreFile);
+                    if (writtenZeroes == 0) {
+                        perror("Failed replace map content with zeroes. Failed to create checkpoint.");
+                        fclose(coreFile);
+                        return 1;
+                    }
+                    leftData -= writtenZeroes;
+				} while (leftData > 0);
 
 				leftData = leftData % sizeof(paddingData);
 				if (leftData) {
