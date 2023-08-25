@@ -32,6 +32,7 @@ minicriu : LDFLAGS += -static
 minicriu : LDLIBS += -lpthread
 minicriu.o : CFLAGS += -fPIE
 
+minicriu-client : LDLIBS += -lpthread
 minicriu-client.o : CFLAGS += -fPIC
 
 libminicriu-client.a : minicriu-client.o
@@ -52,7 +53,7 @@ set-core-pattern :
 	echo /tmp/core.%p | sudo tee /proc/sys/kernel/core_pattern
 
 core : test file
-	grep '^/tmp/core.%p$$' /proc/sys/kernel/core_pattern # assume the specific core_pattern
+#	grep '^/tmp/core.%p$$' /proc/sys/kernel/core_pattern # assume the specific core_pattern
 	export LD_LIBRARY_PATH=$$PWD; bash -c 'echo $$$$ > /tmp/test.pid; ulimit -c unlimited; exec ./$<'; mv /tmp/core.$$(cat /tmp/test.pid) $@
 	rm /tmp/test.pid
 

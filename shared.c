@@ -24,6 +24,7 @@
  * POSSIBILITY OF SUCH DAMAGE.
  */
 
+#include <unistd.h>
 #include <sys/syscall.h>      /* Definition of SYS_* constants */
 
 #include "shared.h"
