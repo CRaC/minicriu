@@ -2,5 +2,6 @@
 /test
 /core
 /file
-/libshared.so
+*.so
 *.[aod]
+minicriu-dump.*
