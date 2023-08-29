@@ -62,9 +62,6 @@ void sighnd(int sig) {
 }
 
 void *thread(void *arg) {
-
-	minicriu_register_new_thread();
-
 	thr_local = -gettid();
 
 	pid_t old = gettid();
@@ -72,8 +69,7 @@ void *thread(void *arg) {
 
 	while (1) {
 		fprintf(stderr, "THREAD old tid %d new tid %d local %d\n", old, gettid(), shared_fn());
-// Not sending signals: Signal restore was removed
-//		do_kill(main_thread, "kill main");
+		do_kill(main_thread, "kill main");
 		usleep(300000);
 	}
 }
@@ -112,8 +108,7 @@ int main(int argc, char *argv[]) {
 	pthread_t other;
 	pthread_create(&other, NULL, thread, NULL);
 
-//  This sleep would be interrupted by do_kill
-//	sleep(100);
+	sleep(100);
 
 	if (argc == 1) {
 		if (minicriu_dump()) {
@@ -132,7 +127,7 @@ int main(int argc, char *argv[]) {
 
 	while (1) {
 		printf("MAIN pid old %d new %d tid %d local %d\n", oldpid, getpid(), gettid(), shared_fn());
-//		do_kill(other, "kill other");
+		do_kill(other, "kill other");
 		sleep(1);
 	}
 
