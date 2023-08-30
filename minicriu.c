@@ -42,8 +42,8 @@
 #include <sys/procfs.h>
 #include <sys/stat.h>
 #include <sys/ucontext.h>
-#include <asm/prctl.h>        /* Definition of ARCH_* constants */
-#include <sys/syscall.h>      /* Definition of SYS_* constants */
+#include <asm/prctl.h>		/* Definition of ARCH_* constants */
+#include <sys/syscall.h>	  /* Definition of SYS_* constants */
 #include <linux/sched.h>
 #include <linux/elf.h>
 
@@ -305,8 +305,8 @@ int main(int argc, char *argv[]) {
 
 	for (int i = 1; i < thread_n; ++i) {
 		const int flags = CLONE_VM | CLONE_FS | CLONE_FILES | CLONE_SYSVSEM
-                           | CLONE_SIGHAND | CLONE_THREAD;
-                           /*| CLONE_SETTLS | CLONE_PARENT_SETTID | CLONE_CHILD_CLEARTID*/
+			| CLONE_SIGHAND | CLONE_THREAD;
+			/*| CLONE_SETTLS | CLONE_PARENT_SETTID | CLONE_CHILD_CLEARTID*/
 #if 0
 		static_assert(sizeof(stack[i]) == 4 * 4096);
 		struct clone_args args = {

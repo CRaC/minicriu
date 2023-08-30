@@ -38,7 +38,7 @@
 #include <pthread.h>
 #include <signal.h>
 #include <fcntl.h>
-#include <sys/syscall.h>      /* Definition of SYS_* constants */
+#include <sys/syscall.h>	/* Definition of SYS_* constants */
 #include <sys/prctl.h>
 #include <sys/mman.h>
 #include <linux/futex.h>
@@ -92,8 +92,8 @@ struct savedctx {
 };
 
 struct mc_map {
-    void *start;
-    void *end;
+	void *start;
+	void *end;
 } maps[MC_MAX_MAPS];
 
 #define SAVE_CTX(ctx) do { \
@@ -368,25 +368,25 @@ static int mc_save_core_file() {
 			int written = fwrite((void *)phdr[i].p_vaddr, 1, phdr[i].p_filesz, coreFile);
 
 			if (written != phdr[i].p_filesz) {
-			    // This happens when the mapping is larger than the mapped file (rounded up to page size)
-			    // - errno is EFAULT. Accessing that memory directly would result in SIGBUS.
+				// This happens when the mapping is larger than the mapped file (rounded up to page size)
+				// - errno is EFAULT. Accessing that memory directly would result in SIGBUS.
 				if (errno != EFAULT) {
-				    perror("Failed write map content");
-				    return 1;
+					perror("Failed write map content");
+					return 1;
 				}
 
 				// We fill the unwritten data with zeros
 				int leftData = phdr[i].p_filesz - written;
 				do {
-				    int n = leftData < sizeof(paddingData) ? leftData : sizeof(paddingData);
+					int n = leftData < sizeof(paddingData) ? leftData : sizeof(paddingData);
 
-                    int writtenZeroes = fwrite(paddingData, 1, n, coreFile);
-                    if (writtenZeroes == 0) {
-                        perror("Failed replace map content with zeroes. Failed to create checkpoint.");
-                        fclose(coreFile);
-                        return 1;
-                    }
-                    leftData -= writtenZeroes;
+					int writtenZeroes = fwrite(paddingData, 1, n, coreFile);
+					if (writtenZeroes == 0) {
+						perror("Failed replace map content with zeroes. Failed to create checkpoint.");
+						fclose(coreFile);
+						return 1;
+					}
+					leftData -= writtenZeroes;
 				} while (leftData > 0);
 
 				leftData = leftData % sizeof(paddingData);
@@ -521,10 +521,10 @@ int minicriu_dump(void) {
 	// Say to other threads that barrier is initialized
 	__atomic_fetch_add(&mc_barrier_initialization, 1, __ATOMIC_SEQ_CST);
 	syscall(SYS_futex, &mc_barrier_initialization, FUTEX_WAKE, thread_counter);
-    if (mc_getmap())
+	if (mc_getmap())
 		printf("failed to get maps from /proc/self/maps\n");
 
-    // TODO: save signal handlers
+	// TODO: save signal handlers
 
 	pid_t pid = syscall(SYS_getpid);
 
