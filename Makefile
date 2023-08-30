@@ -53,9 +53,7 @@ set-core-pattern :
 	echo /tmp/core.%p | sudo tee /proc/sys/kernel/core_pattern
 
 core : test file
-#	grep '^/tmp/core.%p$$' /proc/sys/kernel/core_pattern # assume the specific core_pattern
-	export LD_LIBRARY_PATH=$$PWD; bash -c 'echo $$$$ > /tmp/test.pid; ulimit -c unlimited; exec ./$<'; mv /tmp/core.$$(cat /tmp/test.pid) $@
-	rm /tmp/test.pid
+	export LD_LIBRARY_PATH=$$PWD; exec ./$<; 
 
 sim-run : test
 	gdb -q -batch -ex 'handle SIGABRT noprint nostop nopass' -ex 'run' ./test
