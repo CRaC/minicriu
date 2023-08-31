@@ -52,9 +52,9 @@
 #include "minicriu-client.h"
 
 // Signal sent to all threads but the checkpointing one
-#define MC_THREAD_SIG SIGSYS
+#define MC_CHECKPOINT_THREAD SIGSYS
 // Registers are checkpointed on all threads
-#define MC_GET_REGISTERS SIGUSR1
+#define MC_PERSIST_REGISTERS SIGUSR1
 #define MC_MAX_MAPS 512
 #define MC_MAX_PHDRS 512
 #define MC_MAX_THREADS 64
@@ -86,7 +86,7 @@ static volatile uint32_t mc_restored_threads;
 int mc_mapscnt;
 static volatile uint32_t mc_barrier_initialization;
 
-static void mc_sighnd(int sig);
+static void mc_checkpoint_thread(int sig);
 static int mc_getmap();
 static int mc_cleanup();
 
@@ -416,7 +416,7 @@ static int mc_save_core_file() {
 	return 0;
 }
 
-static void mc_make_core(int sig, siginfo_t *info, void *ctx) {
+static void mc_persist_registers(int sig, siginfo_t *info, void *ctx) {
 	ucontext_t *uc = (ucontext_t *)ctx;
 	greg_t *gregs = uc->uc_mcontext.gregs;
 	int thread_id = gregs[REG_RDX]; // get extra argument
@@ -461,7 +461,7 @@ static inline bool mc_is_internal_signal(int signum) {
 }
 
 // It is not possible to change signal mask for another thread, so in the unlikely
-// case that the thread blocks MC_THREAD_SIG we must give up on checkpoint.
+// case that the thread blocks MC_CHECKPOINT_THREAD we must give up on checkpoint.
 // In the past this was unblocked by minicriu_register_new_thread but there's no
 // guarantee that the thread wouldn't block the signal at any later point: therefore
 // we'll just make it a requirement from the application side.
@@ -473,8 +473,8 @@ static bool mc_check_signal_blocked(const char *taskid) {
 	while (fgets(line, sizeof(line), status)) {
 		if (!strncmp(line, "SigBlk:", 7)) {
 			unsigned long long bits = strtoull(line + 7, NULL, 16);
-			if (bits & (1 << (MC_THREAD_SIG - 1))) {
-				fprintf(stderr, "Thread LWP %s is blocking signal %d, cannot perform checkpoint.\n", taskid, MC_THREAD_SIG);
+			if (bits & (1 << (MC_CHECKPOINT_THREAD - 1))) {
+				fprintf(stderr, "Thread LWP %s is blocking signal %d, cannot perform checkpoint.\n", taskid, MC_CHECKPOINT_THREAD);
 				fclose(status);
 				return true;
 			}
@@ -507,9 +507,11 @@ int minicriu_dump(void) {
 	struct savedctx ctx;
 	SAVE_CTX(ctx);
 
-	struct sigaction newhnd1 = { .sa_handler = mc_sighnd };
-	struct sigaction newhnd2 = {
-		.sa_sigaction = mc_make_core,
+	struct sigaction checkpoint_thread = {
+		.sa_handler = mc_checkpoint_thread
+	};
+	struct sigaction persist_registers = {
+		.sa_sigaction = mc_persist_registers,
 		.sa_flags = SA_SIGINFO
 	};
 
@@ -522,18 +524,18 @@ int minicriu_dump(void) {
 		}
 	}
 
-	if (sigaction(MC_THREAD_SIG, &newhnd1, NULL)) {
+	if (sigaction(MC_CHECKPOINT_THREAD, &checkpoint_thread, NULL)) {
 		perror("sigaction");
 		return 1;
 	}
 
-	if (sigaction(MC_GET_REGISTERS, &newhnd2, NULL)) {
+	if (sigaction(MC_PERSIST_REGISTERS, &persist_registers, NULL)) {
 		perror("sigaction");
 		return 1;
 	}
 
 	sigset_t sigset, oldset;
-	if (sigemptyset(&sigset) || sigaddset(&sigset, MC_GET_REGISTERS)) {
+	if (sigemptyset(&sigset) || sigaddset(&sigset, MC_PERSIST_REGISTERS)) {
 		perror("Cannot set signal mask");
 		return 1;
 	}
@@ -558,7 +560,7 @@ int minicriu_dump(void) {
 			closedir(tasksdir);
 			return 1;
 		}
-		int r = syscall(SYS_tkill, tid, MC_THREAD_SIG);
+		int r = syscall(SYS_tkill, tid, MC_CHECKPOINT_THREAD);
 		__atomic_fetch_sub(&mc_futex_checkpoint, 1, __ATOMIC_SEQ_CST);
 		thread_counter++;
 	}
@@ -587,7 +589,7 @@ int minicriu_dump(void) {
 	pthread_mutex_lock(&mc_getregs_mutex);
 	int extra_arg = mc_gregs_counter++;
 	pthread_mutex_unlock(&mc_getregs_mutex);
-	int r = syscall(SYS_tkill, syscall(SYS_gettid), MC_GET_REGISTERS, extra_arg);
+	int r = syscall(SYS_tkill, syscall(SYS_gettid), MC_PERSIST_REGISTERS, extra_arg);
 
 	RESTORE_CTX(ctx);
 
@@ -682,7 +684,7 @@ int minicriu_dump(void) {
 }
 
 
-static void mc_sighnd(int sig) {
+static void mc_checkpoint_thread(int sig) {
 
 	__atomic_fetch_add(&mc_futex_checkpoint, 1, __ATOMIC_SEQ_CST);
 	syscall(SYS_futex, &mc_futex_checkpoint, FUTEX_WAKE, 1);
@@ -707,10 +709,10 @@ static void mc_sighnd(int sig) {
 		syscall(SYS_futex, &mc_barrier_initialization, FUTEX_WAIT, current_count);
 	}
 
-	// Note: if signal MC_THREAD_SIG is blocked, we won't get here, and we don't
+	// Note: if signal MC_CHECKPOINT_THREAD is blocked, we won't get here, and we don't
 	// have chance to perform the checkpoint.
 	sigset_t sigmask, old_sigmask;
-	if (sigemptyset(&sigmask) || sigaddset(&sigmask, MC_GET_REGISTERS)) {
+	if (sigemptyset(&sigmask) || sigaddset(&sigmask, MC_PERSIST_REGISTERS)) {
 		perror("Cannot construct thread sigmask");
 	}
 	if (pthread_sigmask(SIG_UNBLOCK, &sigmask, &old_sigmask)) {
@@ -721,7 +723,7 @@ static void mc_sighnd(int sig) {
 	pthread_mutex_lock(&mc_getregs_mutex);
 	int extra_arg = mc_gregs_counter++;
 	pthread_mutex_unlock(&mc_getregs_mutex);
-	int r = syscall(SYS_tkill, syscall(SYS_gettid), MC_GET_REGISTERS, extra_arg);
+	int r = syscall(SYS_tkill, syscall(SYS_gettid), MC_PERSIST_REGISTERS, extra_arg);
 
 
 	while (!mc_futex_restore) {
