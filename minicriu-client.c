@@ -149,6 +149,21 @@ static unsigned long align_up(unsigned long v, unsigned p) {
 	return (v + p - 1) & ~(p - 1);
 }
 
+static int write_padding(FILE *file, size_t bytes) {
+	char paddingData[0x1000];
+	memset(paddingData, 0, sizeof(paddingData));
+	while (bytes > 0) {
+		size_t max = bytes > sizeof(paddingData) ? sizeof(paddingData) : bytes;
+		int written = fwrite(paddingData, 1, max, file);
+		if (written == 0) {
+			fprintf(stderr, "Cannot write padding: %m\n");
+			return 1;
+		}
+		bytes -= written;
+	}
+	return 0;
+}
+
 static int mc_save_core_file() {
 
 	pid_t pid = syscall(SYS_getpid);
@@ -215,7 +230,7 @@ static int mc_save_core_file() {
 		int name_start = 0;
 		int name_end = 0;
 
-		int res = sscanf(buffer, "%p-%p %7s %lx %*d:%*d %*x %n%*[^\n]%n", &addr_start,
+		int res = sscanf(buffer, "%p-%p %7s %lx %*x:%*x %*x %n%*[^\n]%n", &addr_start,
 			&addr_end, perms, &ofs, &name_start, &name_end);
 
 		if (res < 4) {
@@ -250,6 +265,11 @@ static int mc_save_core_file() {
 		phdr[phnum].p_vaddr = (long unsigned int)addr_start;
 		phdr[phnum].p_paddr = 0;
 		phdr[phnum].p_memsz = addr_end - addr_start;
+		// TODO: We should check if the mapped memory equals the file contents
+		// and in that case make filesz 0.
+		// Even if the mapping is non-readable we should check if it's all-zeroes
+		// and exclude contents only if that's so: application might have temporarily
+		// non-accessible parts of memory whose protection will eventually change.
 		phdr[phnum].p_filesz = phdr[phnum].p_flags != 0 ? addr_end - addr_start : 0;
 		phdr[phnum++].p_align = 0x1000;
 	}
@@ -280,12 +300,13 @@ static int mc_save_core_file() {
 	bytesWritten += sizeof(Elf64_Ehdr);
 
 	// Write phdrs
-	fwrite(phdr, sizeof(Elf64_Phdr), phnum, coreFile);
+	int ph_written = fwrite(phdr, sizeof(Elf64_Phdr), phnum, coreFile);
+	if (phnum != ph_written) {
+		fprintf(stderr, "Written only %d/%d phdrs: %m", ph_written, phnum);
+	}
 	bytesWritten += sizeof(Elf64_Phdr) * phnum;
 
 	char owner[] = "CORE"; // "CORE" gives more information while reading using readelf and eu-readelf tools
-	char paddingData[0x1000];
-	memset(paddingData, 0x0, 0x1000);
 	int thread_counter = mc_thread_counter;
 
 	// Write PRSTATUS data for every process thread
@@ -307,7 +328,7 @@ static int mc_save_core_file() {
 
 		if (cur_nhdr->n_namesz % MC_NOTE_PADDING != 0) {
 			int padding = align_up(bytesWritten, MC_NOTE_PADDING) - bytesWritten;
-			fwrite(paddingData, padding, 1, coreFile);
+			write_padding(coreFile, padding);
 			bytesWritten += padding;
 			notes_size += padding;
 		}
@@ -318,7 +339,7 @@ static int mc_save_core_file() {
 
 		if (cur_nhdr->n_descsz % MC_NOTE_PADDING != 0) {
 			int padding = align_up(bytesWritten, MC_NOTE_PADDING) - bytesWritten;
-			fwrite(paddingData, padding, 1, coreFile);
+			write_padding(coreFile, padding);
 			bytesWritten += padding;
 			notes_size += padding;
 		}
@@ -340,21 +361,31 @@ static int mc_save_core_file() {
 
 	if (cur_nhdr->n_namesz % MC_NOTE_PADDING != 0) {
 		int padding = align_up(bytesWritten, MC_NOTE_PADDING) - bytesWritten;
-		fwrite(paddingData, padding, 1, coreFile);
+		write_padding(coreFile, padding);
 		bytesWritten += padding;
 		notes_size += padding;
 	}
 
-	fwrite(&nt_file, sizeof(nt_file.count) + sizeof(nt_file.page_size), 1, coreFile);
-	fwrite(&nt_file.filemaps, sizeof(struct filemap), nt_file.count, coreFile);
+	if (fwrite(&nt_file, sizeof(nt_file.count) + sizeof(nt_file.page_size), 1, coreFile) != 1) {
+		perror("Not all written");
+	}
+	if (fwrite(&nt_file.filemaps, sizeof(struct filemap), nt_file.count, coreFile) != nt_file.count) {
+		perror("Not all written");
+	}
+	bytesWritten += sizeof(nt_file.count) + sizeof(nt_file.page_size) + sizeof(struct filemap) * nt_file.count;
 	for (int i = 0; i < nt_file.count; i++) {
-		fputs(nt_file.filepath[i], coreFile);
-		fputc('\0', coreFile);
+		if (fputs(nt_file.filepath[i], coreFile) == EOF) {
+			perror("fputs");
+		}
+		if (fputc('\0', coreFile) == EOF) {
+			perror("putc");
+		}
+		bytesWritten += strlen(nt_file.filepath[i]) + 1;
 	}
 
 	if (cur_nhdr->n_descsz % MC_NOTE_PADDING != 0) {
 		int padding = align_up(bytesWritten, MC_NOTE_PADDING) - bytesWritten;
-		fwrite(paddingData, padding, 1, coreFile);
+		write_padding(coreFile, padding);
 		bytesWritten += padding;
 		notes_size += padding;
 	}
@@ -363,10 +394,7 @@ static int mc_save_core_file() {
 	for (int i = 1; i < phnum; i++) {
 		if (phdr[i].p_filesz != 0) {
 			int padding = phdr[i].p_offset - (phdr[i - 1].p_offset + phdr[i - 1].p_filesz);
-			if (padding > 0) {
-				fwrite(paddingData, sizeof(paddingData), padding / sizeof(paddingData), coreFile);
-				fwrite(paddingData, padding % sizeof(paddingData), 1, coreFile);
-			}
+			write_padding(coreFile, padding);
 
 			int written = fwrite((void *)phdr[i].p_vaddr, 1, phdr[i].p_filesz, coreFile);
 
@@ -379,27 +407,7 @@ static int mc_save_core_file() {
 				}
 
 				// We fill the unwritten data with zeros
-				int leftData = phdr[i].p_filesz - written;
-				do {
-					int n = leftData < sizeof(paddingData) ? leftData : sizeof(paddingData);
-
-					int writtenZeroes = fwrite(paddingData, 1, n, coreFile);
-					if (writtenZeroes == 0) {
-						perror("Failed replace map content with zeroes. Failed to create checkpoint.");
-						fclose(coreFile);
-						return 1;
-					}
-					leftData -= writtenZeroes;
-				} while (leftData > 0);
-
-				leftData = leftData % sizeof(paddingData);
-				if (leftData) {
-					if (fwrite(paddingData, leftData, 1, coreFile)) {
-						perror("Failed replace map content with zeroes. Failed to create checkpoint.");
-						fclose(coreFile);
-						return 1;
-					}
-				}
+				write_padding(coreFile, phdr[i].p_filesz - written);
 			}
 		}
 	}
