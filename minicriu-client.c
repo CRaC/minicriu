@@ -615,53 +615,6 @@ int minicriu_dump(void) {
 
 	writefile("/proc/self/comm", comm, commlen);
 
-#if 0
-	FILE *f = fopen("/proc/self/maps", "r");
-	char line[4096];
-	while (fgets(line, sizeof(line), f)) {
-		if (!strstr(line, "proj/minicriu/minicriu")) {
-			continue;
-		}
-		char *low, *high;
-		if (sscanf(line, "%p-%p", &low, &high) != 2) {
-			continue;
-		}
-		if (munmap(low, high - low)) {
-			perror("munmap");
-		}
-	}
-
-	int fd = open("./test", O_RDONLY);
-	if (fd < 0) {
-		perror("open ./test");
-		return 0;
-	}
-
-	if (syscall(SYS_prctl, PR_SET_MM, PR_SET_MM_EXE_FILE, fd, 0, 0)) {
-		perror("prctl EXE_FILE");
-	}
-#endif
-
-#if 0
-	char *stack = mmap(NULL, 1 * 4096,
-		PROT_READ | PROT_WRITE,
-		MAP_PRIVATE | MAP_GROWSDOWN | MAP_ANONYMOUS,
-		-1, 0);
-	if (stack == MAP_FAILED) {
-		perror("mmap stack");
-	}
-	char *cmd = strcpy(stack, "./test");
-	printf("cmd = %p\n", cmd);
-
-	if (prctl(PR_SET_MM, PR_SET_MM_ARG_START, cmd, 0, 0)) {
-		perror("PR_SET_MM_ARG_START");
-	}
-	printf("end = %p\n", cmd + strlen(cmd) + 1);
-	if (prctl(PR_SET_MM, PR_SET_MM_ARG_END, cmd + strlen(cmd) + 1), 0, 0) {
-		perror("PR_SET_MM_ARG_END");
-	}
-#endif
-
 	mc_futex_restore = 1;
 	syscall(SYS_futex, &mc_futex_restore, FUTEX_WAKE, INT_MAX);
 
