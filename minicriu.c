@@ -399,6 +399,8 @@ int main(int argc, char *argv[]) {
 #endif
 	}
 
+	// TODO: auxv info is now in the core dump, restore it if we have the CAP_SYS_RESOURCE permission
+
 	clonefn((void*)(uintptr_t)0);
 	fprintf(stderr, "should not reach here\n");
 	return 0;
