@@ -52,8 +52,6 @@
 #include <limits.h>
 
 
-static struct elf_prpsinfo *prpsinfo;
-
 #define MAX_THREADS 128
 #define MAX_FILEMAPS 1024
 
@@ -189,7 +187,8 @@ static void visit_note(off_t nameoff, off_t doff, const Elf64_Nhdr *nh) {
 	void *target = NULL;
 	if (!strcmp("CORE", rawelf + nameoff)) {
 		switch (nh->n_type) {
-		case NT_PRPSINFO: target = &prpsinfo; break;
+		// We ignore PRPSINFO (if present): the values might be truncated anyway
+		// so we cannot rely on this for restore.
 		case NT_PRSTATUS: target = &prstatus[thread_n++]; break;
 		case NT_PRFPREG:  target = &prfpreg[thread_n];  break;
 		case NT_AUXV:

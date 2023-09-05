@@ -62,6 +62,8 @@
 #define MC_OWNER_SIZE 5
 #define MC_NOTE_PADDING 4
 
+#define CORE_NOTE_HEADER_SIZE (sizeof(Elf64_Nhdr) + align_up(MC_OWNER_SIZE, MC_NOTE_PADDING))
+
 // Enable or disable debug logging
 #define DEBUG 0
 
@@ -166,6 +168,26 @@ static ssize_t writefile(const char *file, const char *buf, size_t len) {
 
 static unsigned long align_up(unsigned long v, unsigned p) {
 	return (v + p - 1) & ~(p - 1);
+}
+
+static void mc_prepare_prpsinfo(struct elf_prpsinfo *info) {
+	memset(info, 0, sizeof(struct elf_prpsinfo));
+	info->pr_sname = 'R';
+	char exe[PATH_MAX];
+	ssize_t exelen = readlink("/proc/self/exe", exe, sizeof(exe));
+	if (exelen > 0) {
+		const char *last_slash = strrchr(exe, '/');
+		if (last_slash != NULL) {
+			// we are in signal handler, don't want to use snprintf. Missing terminating null is fine.
+			strncpy(info->pr_fname, last_slash + 1, sizeof(info->pr_fname));
+		}
+	}
+	int cmdlen = readfile("/proc/self/cmdline", info->pr_psargs, sizeof(info->pr_psargs));
+	if (cmdlen > 0) {
+		for (int i = 0; i < cmdlen; ++i) {
+			if (info->pr_psargs[i] == '\0') info->pr_psargs[i] = ' ';
+		}
+	}
 }
 
 typedef struct {
@@ -350,10 +372,11 @@ static int mc_save_core_file() {
 
 	// Updating headers
 	ehdr.e_phnum = phnum;
-	int auxv_sz = sizeof(Elf64_Nhdr) + align_up(MC_OWNER_SIZE, MC_NOTE_PADDING) + align_up(auxvlen, MC_NOTE_PADDING);
-	int prstatus_sz = mc_thread_counter * (sizeof(Elf64_Nhdr) + sizeof(struct elf_prstatus) + align_up(MC_OWNER_SIZE, MC_NOTE_PADDING));
-	int ntfile_sz = sizeof(Elf64_Nhdr) + align_up(nt_file.descsz, MC_NOTE_PADDING) + align_up(MC_OWNER_SIZE, MC_NOTE_PADDING);
-	phdr[0].p_filesz = auxv_sz + prstatus_sz + ntfile_sz;
+	int prpsinfo_sz = CORE_NOTE_HEADER_SIZE + sizeof(struct elf_prpsinfo);
+	int auxv_sz = CORE_NOTE_HEADER_SIZE + align_up(auxvlen, MC_NOTE_PADDING);
+	int prstatus_sz = mc_thread_counter * (CORE_NOTE_HEADER_SIZE + sizeof(struct elf_prstatus));
+	int ntfile_sz = CORE_NOTE_HEADER_SIZE + align_up(nt_file.descsz, MC_NOTE_PADDING);
+	phdr[0].p_filesz = prpsinfo_sz + auxv_sz + prstatus_sz + ntfile_sz;
 	phdr[0].p_offset = sizeof(Elf64_Ehdr) + ehdr.e_phnum * ehdr.e_phentsize;
 	for (int i = 1; i < phnum; i++) {
 		phdr[i].p_offset = align_up(phdr[i - 1].p_offset + phdr[i - 1].p_filesz, phdr[i].p_align);
@@ -374,6 +397,10 @@ static int mc_save_core_file() {
 	core_write(&w, &ehdr, sizeof(Elf64_Ehdr));
 	// Write phdrs
 	core_write(&w, phdr, sizeof(Elf64_Phdr) * phnum);
+
+	struct elf_prpsinfo prpsinfo;
+	mc_prepare_prpsinfo(&prpsinfo);
+	core_write_note(&w, NT_PRPSINFO, &prpsinfo, sizeof(prpsinfo));
 
 	core_write_note(&w, NT_AUXV, &auxv, auxvlen);
 
