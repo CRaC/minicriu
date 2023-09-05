@@ -28,6 +28,7 @@
 
 #include <assert.h>
 #include <alloca.h>
+#include <stdbool.h>
 #include <string.h>
 #include <stdint.h>
 #include <stdlib.h>
@@ -36,9 +37,11 @@
 #include <pthread.h>
 #include <signal.h>
 #include <sched.h>
+#include <sys/capability.h>
 #include <sys/mman.h>
 #include <sys/fcntl.h>
 #include <sys/user.h>
+#include <sys/prctl.h>
 #include <sys/procfs.h>
 #include <sys/stat.h>
 #include <sys/ucontext.h>
@@ -171,6 +174,16 @@ static void visit_notes(const Elf64_Phdr *ph_notes, note_visitor *visitor) {
 	}
 }
 
+static bool has_resource_cap() {
+	cap_t capabilities = cap_get_proc();
+	cap_flag_value_t has_resource_cap = CAP_CLEAR;
+	if (CAP_IS_SUPPORTED(CAP_SYS_RESOURCE) && cap_get_flag(capabilities, CAP_SYS_RESOURCE, CAP_EFFECTIVE, &has_resource_cap)) {
+		perror("Failed to check for CAP_SYS_RESOURCE capability");
+	}
+	cap_free(capabilities);
+	return has_resource_cap == CAP_SET;
+}
+
 // what does this really do?
 static void visit_note(off_t nameoff, off_t doff, const Elf64_Nhdr *nh) {
 	void *target = NULL;
@@ -179,6 +192,10 @@ static void visit_note(off_t nameoff, off_t doff, const Elf64_Nhdr *nh) {
 		case NT_PRPSINFO: target = &prpsinfo; break;
 		case NT_PRSTATUS: target = &prstatus[thread_n++]; break;
 		case NT_PRFPREG:  target = &prfpreg[thread_n];  break;
+		case NT_AUXV:
+			if (has_resource_cap() && prctl(PR_SET_MM, PR_SET_MM_AUXV, rawelf + doff, nh->n_descsz, 0)) {
+				perror("Cannot set auxiliary vector");
+			}
 		default: break;
 		}
 	}

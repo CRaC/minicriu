@@ -41,6 +41,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/capability.h>
 #include <sys/mman.h>
 #include <sys/prctl.h>
 #include <sys/procfs.h>
@@ -118,27 +119,46 @@ static pid_t* gettid_ptr(pthread_t thr) {
 	return (pid_t*) ((char*)thr + header_size + 2 * sizeof(void*));
 }
 
-static int readfile(const char *file, char *buf, size_t len) {
+static ssize_t readfile(const char *file, char *buf, size_t len) {
 	int fd = open(file, O_RDONLY);
 	if (fd < 0) {
-		return -errno;
+		fprintf(stderr, "Cannot open %s: %m", file);
+		return -1;
 	}
-	int bytes = read(fd, buf, len);
-	if (bytes < 0) {
-		bytes = -errno;
+	size_t bytes = 0;
+	while (len > 0) {
+		ssize_t r = read(fd, buf, len);
+		if (r < 0) {
+			fprintf(stderr, "Cannot read %s: %m", file);
+			close(fd);
+			return -1;
+		} else if (r == 0) {
+			close(fd);
+			return bytes;
+		}
+		bytes += r;
+		buf += r;
+		len -= r;
 	}
-	close(fd);
-	return bytes;
 }
 
-static int writefile(const char *file, const char *buf, size_t len) {
+static ssize_t writefile(const char *file, const char *buf, size_t len) {
 	int fd = open(file, O_RDWR);
 	if (fd < 0) {
-		return -errno;
+		fprintf(stderr, "Cannot open (for write) %s: %m", file);
+		return -1;
 	}
-	int bytes = write(fd, buf, len);
-	if (bytes < 0) {
-		bytes = -errno;
+	size_t bytes = 0;
+	while (len > 0) {
+		ssize_t w = write(fd, buf, len);
+		if (w < 0) {
+			fprintf(stderr, "Cannot write %s: %m", file);
+			close(fd);
+			return -1;
+		}
+		bytes += w;
+		buf += w;
+		len -= w;
 	}
 	close(fd);
 	return bytes;
@@ -474,6 +494,21 @@ static bool mc_check_signal_blocked(const char *taskid) {
 	return false;
 }
 
+static void mc_find_args(void **args_start, void **args_end) {
+	FILE *stat = fopen("/proc/self/stat", "r");
+	if (stat == NULL) {
+		perror("Cannot open /proc/self/stat");
+	}
+	/* See man proc:            1   2   3   4   5   6   7   8   9  10  11  12  13  14  15  16  17  18  19  20  21  22  23  24  25  26  27  28  29  30  31  32  33  34  35  36  37  38  39  40  41  42  43  44  45  46  47  48  49  50  51  52 */
+	int items = fscanf(stat, "%*d %*s %*c %*d %*d %*d %*d %*d %*u %*u %*u %*u %*u %*u %*u %*d %*d %*d %*d %*d %*d %*u %*u %*d %*u %*u %*u %*u %*u %*u %*u %*u %*u %*u %*u %*u %*u %*d %*d %*u %*u %*u %*u %*d %*u %*u %*u %lu %lu %*u %*u %*d",
+		(unsigned long *) args_start, (unsigned long *) args_end);
+	if (items != 2) {
+		fprintf(stderr, "Failed to parse /proc/self/stat: read %d items\n", items);
+		volatile int x = 1; while(x);
+	}
+	fclose(stat);
+}
+
 int minicriu_dump(void) {
 
 	pid_t mytid = syscall(SYS_gettid);
@@ -482,10 +517,13 @@ int minicriu_dump(void) {
 	debug_log("minicriu thread %d\n", mytid);
 
 	char comm[1024];
-	int commlen = readfile("/proc/self/comm", comm, sizeof(comm));
-	if (commlen < 0) {
-		fprintf(stderr, "read comm: %s\n", strerror(commlen));
-	}
+	ssize_t commlen = readfile("/proc/self/comm", comm, sizeof(comm));
+
+	char exe[PATH_MAX];
+	ssize_t exelen = readlink("/proc/self/exe", exe, sizeof(exe));
+
+	void *args_start = NULL, *args_end = NULL;
+	mc_find_args(&args_start, &args_end);
 
 	struct savedctx ctx;
 	SAVE_CTX(ctx);
@@ -592,8 +630,6 @@ int minicriu_dump(void) {
 		return 1;
 	}
 
-	writefile("/proc/self/comm", comm, commlen);
-
 	mc_futex_restore = 1;
 	syscall(SYS_futex, &mc_futex_restore, FUTEX_WAKE, INT_MAX);
 
@@ -611,6 +647,49 @@ int minicriu_dump(void) {
 
 	volatile int thread_loop = 0;
 	while (thread_loop);
+
+	cap_t capabilities = cap_get_proc();
+	cap_flag_value_t has_resource_cap = CAP_CLEAR;
+	if (CAP_IS_SUPPORTED(CAP_SYS_RESOURCE) && cap_get_flag(capabilities, CAP_SYS_RESOURCE, CAP_EFFECTIVE, &has_resource_cap)) {
+		perror("Failed to check for CAP_SYS_RESOURCE capability");
+	}
+	cap_free(capabilities);
+
+	if (has_resource_cap && args_start != NULL && args_end != NULL) {
+		// We cannot update args' start-end atomically but kernel checks that the range
+		// is correctly ordered at any point.
+		void *old_start = NULL, *old_end = NULL;
+		mc_find_args(&old_start, &old_end);
+		if (args_start >= old_end && prctl(PR_SET_MM, PR_SET_MM_ARG_END, args_end, 0, 0)) {
+			fprintf(stderr, "Cannot reset arguments to %p-%p(<--): %m\n", args_start, args_end);
+		}
+		if (prctl(PR_SET_MM, PR_SET_MM_ARG_START, args_start, 0, 0)) {
+			fprintf(stderr, "Cannot reset arguments to (-->)%p-%p: %m\n", args_start, args_end);
+		}
+		if (args_start < old_end && prctl(PR_SET_MM, PR_SET_MM_ARG_END, args_end, 0, 0)) {
+			fprintf(stderr, "Cannot reset arguments to %p-%p(<--): %m\n", args_start, args_end);
+		}
+	}
+	if (has_resource_cap && exelen > 0) {
+		char buf[PATH_MAX] = { '\0' };
+		if (readlink("/proc/self/exe", buf, sizeof(buf)) < 0) {
+			perror("Cannot read current exe");
+		}
+		// Do not change exe in the checkpointed process
+		if (strcmp(buf, exe)) {
+			int exefd = open(exe, O_RDONLY);
+			if (exefd < 0) {
+				fprintf(stderr, "Cannot open original exe file %s: %m", exe);
+			} else {
+				if (prctl(PR_SET_MM, PR_SET_MM_EXE_FILE, exefd, 0, 0)) {
+					fprintf(stderr, "Cannot restore exe %s (FD %d): %m\n", exe, exefd);
+				}
+				close(exefd);
+			}
+		}
+	} else if (commlen > 0) {
+		writefile("/proc/self/comm", comm, commlen);
+	}
 
 	return 0;
 }
