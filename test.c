@@ -25,12 +25,14 @@
  */
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <errno.h>
 #include <unistd.h>
 #include <pthread.h>
 #include <signal.h>
 #include <sys/fcntl.h>
 #include <sys/mman.h>
+#include <sys/stat.h>
 #include <sys/syscall.h>      /* Definition of SYS_* constants */
 
 #include "minicriu-client.h"
@@ -60,16 +62,13 @@ void sighnd(int sig) {
 }
 
 void *thread(void *arg) {
-
-	minicriu_register_new_thread();
-
 	thr_local = -gettid();
 
 	pid_t old = gettid();
 	printf("tid %d\n", old);
 
 	while (1) {
-		printf("THREAD old tid %d new tid %d local %d\n", old, gettid(), shared_fn());
+		fprintf(stderr, "THREAD old tid %d new tid %d local %d\n", old, gettid(), shared_fn());
 		do_kill(main_thread, "kill main");
 		usleep(300000);
 	}
@@ -86,6 +85,13 @@ int main(int argc, char *argv[]) {
 		perror("open");
 		return 1;
 	}
+	struct stat st;
+	if (fstat(fd, &st)) {
+        perror("fstat");
+    } else if (st.st_size != 4096) {
+        fprintf(stderr, "Unexpected size; 'file' should be truncated to 4096 bytes\n");
+        return 1;
+    }
 
 	void *addr = mmap(NULL, 4096 * 1024, PROT_READ | PROT_WRITE, MAP_PRIVATE, fd, 0);
 	if (addr == MAP_FAILED) {
@@ -95,7 +101,7 @@ int main(int argc, char *argv[]) {
 	*(int*)addr = 1;
 
 	pid_t oldpid = getpid();
-	printf("pid %ld\n", oldpid);
+	printf("pid %d\n", oldpid);
 
 	thr_local = -gettid();
 
@@ -105,7 +111,10 @@ int main(int argc, char *argv[]) {
 	sleep(100);
 
 	if (argc == 1) {
-		minicriu_dump();
+		if (minicriu_dump()) {
+		    fprintf(stderr, "TEST FAILED\n");
+		    exit(1);
+		}
 	}
 
 	printf("done\n");
@@ -117,7 +126,7 @@ int main(int argc, char *argv[]) {
 	printf("done2\n");
 
 	while (1) {
-		printf("MAIN pid old %ld new %ld local %d\n", oldpid, getpid(), shared_fn());
+		printf("MAIN pid old %d new %d tid %d local %d\n", oldpid, getpid(), gettid(), shared_fn());
 		do_kill(other, "kill other");
 		sleep(1);
 	}

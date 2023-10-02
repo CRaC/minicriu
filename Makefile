@@ -1,15 +1,15 @@
 #  Copyright 2017-2022 Azul Systems, Inc.
-# 
+#
 #  Redistribution and use in source and binary forms, with or without
 #  modification, are permitted provided that the following conditions are met:
-# 
+#
 #  1. Redistributions of source code must retain the above copyright notice,
 #  this list of conditions and the following disclaimer.
-# 
+#
 #  2. Redistributions in binary form must reproduce the above copyright notice,
 #  this list of conditions and the following disclaimer in the documentation
 #  and/or other materials provided with the distribution.
-# 
+#
 #  THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
 #  AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
 #  IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
@@ -23,13 +23,13 @@
 #  POSSIBILITY OF SUCH DAMAGE.
 
 CFLAGS = -g -MMD -MT $@ -MF $@.d
+LDLIBS+= -lpthread -lcap
 ASFLAGS = $(CFLAGS)
 
 all : minicriu libminicriu-client.a
 
 minicriu : minicriu.o
 minicriu : LDFLAGS += -static
-minicriu : LDLIBS += -lpthread
 minicriu.o : CFLAGS += -fPIE
 
 minicriu-client.o : CFLAGS += -fPIC
@@ -38,7 +38,6 @@ libminicriu-client.a : minicriu-client.o
 	ar rcs $@ $^
 
 test : test.o libminicriu-client.a libshared.so
-test : LDLIBS += -lpthread
 
 shared.o : CFLAGS += -fPIC
 
@@ -52,9 +51,7 @@ set-core-pattern :
 	echo /tmp/core.%p | sudo tee /proc/sys/kernel/core_pattern
 
 core : test file
-	grep '^/tmp/core.%p$$' /proc/sys/kernel/core_pattern # assume the specific core_pattern
-	export LD_LIBRARY_PATH=$$PWD; bash -c 'echo $$$$ > /tmp/test.pid; ulimit -c unlimited; exec ./$<'; mv /tmp/core.$$(cat /tmp/test.pid) $@
-	rm /tmp/test.pid
+	export LD_LIBRARY_PATH=$$PWD; exec ./$<;
 
 sim-run : test
 	gdb -q -batch -ex 'handle SIGABRT noprint nostop nopass' -ex 'run' ./test
